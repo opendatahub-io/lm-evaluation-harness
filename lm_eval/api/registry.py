@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Callable, Dict
 
 import evaluate as hf_evaluate
@@ -90,6 +91,8 @@ DEFAULT_METRIC_REGISTRY = {
     "generate_until": ["exact_match"],
 }
 
+LMEVAL_METRICS_PREFIX = os.getenv("LMEVAL_METRICS_PREFIX", "metrics")
+
 
 def register_metric(**args):
     # TODO: do we want to enforce a certain interface to registered metrics?
@@ -130,7 +133,10 @@ def get_metric(name: str, hf_evaluate_metric=False) -> Callable:
             )
 
     try:
-        metric_object = hf_evaluate.load(name)
+        preload_metric = os.path.join(LMEVAL_METRICS_PREFIX, name)
+        metric_object = hf_evaluate.load(
+            preload_metric if os.path.exists(preload_metric) else name
+        )
         return metric_object.compute
     except Exception:
         eval_logger.error(
