@@ -19,7 +19,7 @@ if os.environ.get("HF_EVALUATE_OFFLINE") == "1":
     evaluate_load = evaluate.load
 
     # Use the specified metrics prefix. If not set use the default.
-    LMEVAL_METRICS_PREFIX = os.getenv("LMEVAL_METRICS_PREFIX", "lm-evaluation-harness/metrics")
+    LMEVAL_METRICS_PREFIX = os.getenv("LMEVAL_METRICS_PREFIX", "/opt/app-root/src/metrics")
 
     # Load the metrics from the centralised folder
     def load_from_path(path, *args, **kwargs):
