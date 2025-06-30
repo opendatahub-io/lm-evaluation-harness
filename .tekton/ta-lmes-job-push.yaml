@@ -13,9 +13,9 @@ metadata:
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: opendatahub-release
-    appstudio.openshift.io/component: lm-evaluation-harness
+    appstudio.openshift.io/component: ta-lmes-job
     pipelines.appstudio.openshift.io/type: build
-  name: lm-evaluation-harness-on-push
+  name: ta-lmes-job-on-push
   namespace: open-data-hub-tenant
 spec:
   params:
@@ -653,7 +653,7 @@ spec:
     - name: netrc
       optional: true
   taskRunTemplate:
-    serviceAccountName: build-pipeline-lm-evaluation-harness
+    serviceAccountName: build-pipeline-ta-lmes-job
   workspaces:
   - name: git-auth
     secret:
