@@ -41,6 +41,7 @@ dependencies = [
     "unitxt==1.17.2",
     "jiwer==3.0.5",
     "boto3==1.36.11",
+    "mlflow-skinny>=2.8.0,<3.0.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -78,6 +79,7 @@ dev = [
 hf_transfer = ["hf-transfer==0.1.9"]
 testing = ["pytest==8.3.3", "pytest-cov==6.0.0", "pytest-xdist==3.6.1"]
 ibm_watsonx_ai = ["ibm-watsonx-ai==1.1.23"]
+mlflow = ["mlflow-skinny==2.16.2"]
 
 [tool.ruff.lint]
 extend-select = ["I"]
