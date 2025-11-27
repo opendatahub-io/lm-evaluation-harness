@@ -70,10 +70,6 @@ def skopeo_params(infix: str = ""):
     skopeo_params = []
     docker_config_path = Path("/tmp/.docker/config.json")
     if docker_config_path.exists():
-        logger.info(f"Contents of {docker_config_path}:")
-       # TODO remove below printing
-        with open(docker_config_path, 'r') as f:
-            logger.info(f.read())
         skopeo_params.append("--"+infix+"authfile")
         skopeo_params.append("/tmp/.docker/config.json")
     else:
