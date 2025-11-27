@@ -44,7 +44,7 @@ def main():
     output_path = this_script_path.parent / ".." / "output"
     logger.info(f"Output path: {output_path}")
     if output_path.exists():
-        subdirs = [d for d in output_path.iterdir() if d.is_dir() and d.name != "lost+found"]
+        subdirs = [d for d in output_path.iterdir() if is_valid_subdir(d)]
         if len(subdirs) == 1:
             output_path = subdirs[0]
             logger.info(f"Output path updated to single subdirectory: {output_path}")
@@ -58,6 +58,11 @@ def main():
 
     logger.info("Transfering oci-layout of OCI Artifact (traces and results) to destination...")
     skopeo_push(oci_layout_path, oci_ref, skopeo_params("dest-"))
+
+
+def is_valid_subdir(path: Path) -> bool:
+    """Return True if this is a subdirectory we want to consider containing results and traces"""
+    return path.is_dir() and path.name != "lost+found"
 
 
 def skopeo_params(infix: str = ""):
