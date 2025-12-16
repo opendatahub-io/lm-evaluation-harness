@@ -1,12 +1,17 @@
-name: Tasks Modified
+name: Tier 1 - Tasks modified
 
 on:
   push:
     branches:
       - 'main'
+      - 'incubation'
+      - 'stable'
   pull_request:
     branches:
       - 'main'
+      - 'incubation'
+      - 'stable'
+      - 'release-*'
   workflow_dispatch:
 # comment/edit out the above to stop/change the triggers
 jobs:
