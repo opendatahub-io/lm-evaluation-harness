@@ -8,8 +8,8 @@ metadata:
     pipelinesascode.tekton.dev/cancel-in-progress: "false"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
     pipelinesascode.tekton.dev/on-cel-expression: >
-      (event == "push" && source_branch  == "incubation") || 
-      (event == "pull_request" && source_branch == "incubation")
+      (event == "push" && target_branch  == "incubation") || 
+      (event == "pull_request" && target_branch == "incubation")
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: opendatahub-release
