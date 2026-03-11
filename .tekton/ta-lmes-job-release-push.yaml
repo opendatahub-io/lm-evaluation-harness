@@ -29,7 +29,7 @@ spec:
   - name: path-context
     value: .
   taskRunSpecs:
-    - pipelineTaskName: build-images
+    - pipelineTaskName: build-container
       stepSpecs:
         - name: build
           computeResources:
