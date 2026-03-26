@@ -346,9 +346,9 @@ class LMEvalAdapter(FrameworkAdapter):
                 coords.annotations.update(
                     {
                         "org.opencontainers.image.created": datetime.now(UTC).isoformat(),
-                        "org.evalhub.benchmark": benchmark_id,
-                        "org.evalhub.model": model_name,
-                        "org.evalhub.job_id": job_id,
+                        "io.github.eval-hub.benchmark": benchmark_id,
+                        "io.github.eval-hub.model": model_name,
+                        "io.github.eval-hub.job_id": job_id,
                     }
                 )
                 oci_spec = OCIArtifactSpec(
@@ -427,18 +427,7 @@ def main() -> int:
         logger.info("=" * 80)
 
         # Initialize callbacks using job spec callback_url and adapter settings
-        callbacks = DefaultCallbacks(
-            job_id=adapter.job_spec.id,
-            benchmark_id=adapter.job_spec.benchmark_id,
-            benchmark_index=adapter.job_spec.benchmark_index,
-            provider_id=adapter.job_spec.provider_id,
-            sidecar_url=adapter.job_spec.callback_url,
-            insecure=bool(adapter.settings.evalhub_insecure),
-            auth_token_path=adapter.settings.resolved_auth_token_path,
-            ca_bundle_path=adapter.settings.resolved_ca_bundle_path,
-            oci_auth_config_path=adapter.settings.oci_auth_config_path,
-            oci_insecure=bool(adapter.settings.oci_insecure),
-        )
+        callbacks = DefaultCallbacks.from_adapter(adapter)
 
         # Run evaluation
         results = adapter.run_benchmark_job(adapter.job_spec, callbacks)
