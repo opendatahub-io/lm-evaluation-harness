@@ -808,14 +808,14 @@ files = [
 
 [[package]]
 name = "eval-hub-sdk"
-version = "0.1.2"
+version = "0.1.4"
 description = "Python SDK for EvalHub: common models, REST API client, and framework adapter SDK"
 optional = false
 python-versions = ">=3.11"
 groups = ["main"]
 files = [
-    {file = "eval_hub_sdk-0.1.2-py3-none-any.whl", hash = "sha256:e96655c50bc7e77ba520905b83ad5356d6e909a1a95421d9607e926e1267c083"},
-    {file = "eval_hub_sdk-0.1.2.tar.gz", hash = "sha256:127018308b0f0156c268af09511b346c94939daacb98db28ff91d083d63799c7"},
+    {file = "eval_hub_sdk-0.1.4-py3-none-any.whl", hash = "sha256:6c141eb37ee1a5ad12b9530c37c6a28e0676f4ffe7a8f733911fd2f3bd23d0d4"},
+    {file = "eval_hub_sdk-0.1.4.tar.gz", hash = "sha256:9ce33e0debecc8d7a55387e76434ce34fe62a87b3d45524243d1aa53d022aa10"},
 ]
 
 [package.dependencies]
