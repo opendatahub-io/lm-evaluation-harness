@@ -1,3 +1,6 @@
+# Build from the parent of lm-evaluation-harness (must also contain eval-hub-sdk/):
+#   docker build -f lm-evaluation-harness/Dockerfile.lmes-job -t lmes-job:latest .
+#
 ###############################################################
 # Stage 1 Base builder image with common tooling
 ###############################################################
@@ -78,7 +81,8 @@ RUN if [ "$TARGETARCH" = "ppc64le" ] ; then \
         bdist_wheel --dist-dir /arrowwheels/ \
 ; fi
 
-COPY patches/s390x/parquet-support.patch /tmp/s390x-parquet.patch
+# Build context: parent directory containing lm-evaluation-harness/ and eval-hub-sdk/
+COPY lm-evaluation-harness/patches/s390x/parquet-support.patch /tmp/s390x-parquet.patch
 
 RUN if [ "$TARGETARCH" = "s390x" ] ; then \
     git clone https://github.com/apache/arrow.git --recursive && \
@@ -200,18 +204,19 @@ RUN if [ "$TARGETARCH" = "ppc64le" ]; then \
 RUN sed -i.bak 's/include-system-site-packages = false/include-system-site-packages = true/' /opt/app-root/pyvenv.cfg
 
 # Copy license
-COPY LICENSE.md /licenses/lm-evaluation-harness.md
+COPY lm-evaluation-harness/LICENSE.md /licenses/lm-evaluation-harness.md
 
 WORKDIR /opt/app-root/src
-COPY . .
+COPY lm-evaluation-harness/ .
 
-# Copy the pinned requirements file
-COPY requirements.txt .
+# Local eval-hub-sdk (editable): install before harness so requirements.txt cannot pin PyPI over it.
+COPY eval-hub-sdk/ /opt/eval-hub-sdk/
+RUN sed '/eval-hub-sdk/d' requirements.txt > /tmp/requirements.nosdk.txt && \
+    pip install --no-cache-dir -r /tmp/requirements.nosdk.txt
+RUN pip install --no-cache-dir -e "/opt/eval-hub-sdk[adapter]"
+RUN python -c "import evalhub; v,p=evalhub.sdk_install_debug_info(); print('EVALHUB_SDK_DOCKER_BUILD', v, p)"
 
-# Install the pinned dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Install the package
+# Install the harness package (no deps: requirements + SDK already satisfied)
 RUN pip install --no-cache-dir --no-deps -e .
 
 USER default

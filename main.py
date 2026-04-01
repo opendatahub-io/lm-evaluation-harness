@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import evalhub
 from evalhub.adapter import (
     DefaultCallbacks,
     EvaluationResult,
@@ -36,8 +37,6 @@ from evalhub.adapter import (
     MessageInfo,
     OCIArtifactSpec,
 )
-from evalhub.adapter.auth import resolve_model_credentials
-
 from lm_eval import simple_evaluate
 from lm_eval.tasks import TaskManager
 
@@ -49,6 +48,21 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+
+def _log_evalhub_sdk_install() -> None:
+    """Log which eval-hub-sdk is loaded (verify Docker/local editable install)."""
+    dbg = getattr(evalhub, "sdk_install_debug_info", None)
+    if callable(dbg):
+        ver, root = dbg()
+    else:
+        ver = getattr(evalhub, "__version__", "unknown")
+        root = str(getattr(evalhub, "__file__", ""))
+    logger.info(
+        "EVALHUB_SDK_INSTALL_DEBUG: version=%s package_path=%s",
+        ver,
+        root,
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -164,14 +178,6 @@ class LMEvalAdapter(FrameworkAdapter):
         start_time = time.time()
 
         try:
-            creds = resolve_model_credentials()
-            if creds.api_key:
-                os.environ["OPENAI_API_KEY"] = creds.api_key
-            else:
-                auth_value = creds.auth_headers.get("Authorization", "")
-                if auth_value.startswith("Bearer "):
-                    token = auth_value.replace("Bearer ", "").strip()
-                    os.environ["OPENAI_API_KEY"] = token
             job_id = config.id
             benchmark_id = config.benchmark_id
             model_name = config.model.name
@@ -186,9 +192,6 @@ class LMEvalAdapter(FrameworkAdapter):
             random_seed = int(benchmark_params.get("random_seed", 42))
 
             model_backend, model_args, gen_kwargs = build_lmeval_config(config)
-            if creds.ca_cert_path:
-                # Resolve to a real path so lm_eval accepts it (K8s secret volume mounts expose keys as symlinks).
-                model_args["verify_certificate"] = os.path.realpath(creds.ca_cert_path)
 
             # Phase 1: Initialization
             callbacks.report_status(
@@ -432,7 +435,7 @@ def main() -> int:
     Returns:
         int: Exit code (0 for success, 1 for failure)
     """
-    import os
+    _log_evalhub_sdk_install()
 
     try:
         # Create adapter with job spec path from environment or default
