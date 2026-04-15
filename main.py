@@ -37,6 +37,8 @@ from evalhub.adapter import (
     MessageInfo,
     OCIArtifactSpec,
 )
+from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
+
 from lm_eval import simple_evaluate
 from lm_eval.tasks import TaskManager
 
@@ -178,6 +180,44 @@ class LMEvalAdapter(FrameworkAdapter):
         start_time = time.time()
 
         try:
+            # When offline mode is enabled, configure HuggingFace libraries to
+            # use only local data from /test_data (populated by the init container
+            # from S3 via test_data_ref).  This covers both datasets and tokenizers.
+            if config.parameters.get("offline"):
+                test_data_dir = "/test_data"
+                if not os.path.isdir(test_data_dir):
+                    raise RuntimeError(
+                        f"Offline mode requested but {test_data_dir} does not exist. "
+                        "Ensure test_data_ref is configured so the init container "
+                        "populates the directory before the adapter starts."
+                    )
+                os.environ["HF_HOME"] = test_data_dir
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                os.environ["HF_DATASETS_OFFLINE"] = "1"
+                os.environ["HF_EVALUATE_OFFLINE"] = "1"
+                os.environ["TRANSFORMERS_OFFLINE"] = "1"
+                logger.info(
+                    "Offline mode enabled: HF_HOME=%s, downloads disabled",
+                    test_data_dir,
+                )
+
+            creds = resolve_model_credentials()
+            if creds.api_key:
+                os.environ["OPENAI_API_KEY"] = creds.api_key
+            else:
+                auth_value = creds.auth_headers.get("Authorization", "")
+                if auth_value.startswith("Bearer "):
+                    token = auth_value.replace("Bearer ", "").strip()
+                    os.environ["OPENAI_API_KEY"] = token
+
+            # Set HF_TOKEN for gated dataset access (e.g. leaderboard_gpqa).
+            # Priority: HF_TOKEN env var > hf-token in model auth secret.
+            if not os.environ.get("HF_TOKEN"):
+                hf_token = read_model_auth_key("hf-token")
+                if hf_token:
+                    os.environ["HF_TOKEN"] = hf_token
+                    logger.info("HF_TOKEN set from model auth secret (hf-token)")
+
             job_id = config.id
             benchmark_id = config.benchmark_id
             model_name = config.model.name
@@ -403,7 +443,26 @@ class LMEvalAdapter(FrameworkAdapter):
             return job_results
 
         except Exception as e:
-            logger.error(f"Evaluation failed: {e}", exc_info=True)
+            logger.error("Evaluation failed", exc_info=True)
+
+            error_str = str(e)
+            error_lower = error_str.lower()
+            is_gated = (
+                "gated repo" in error_lower
+                or "gated dataset" in error_lower
+                or ("403" in error_lower and "huggingface" in error_lower)
+            )
+
+            if is_gated:
+                error_message = (
+                    "Gated HuggingFace dataset error; authentication required. "
+                    "Set HF_TOKEN by adding an 'hf-token' key to your "
+                    "model auth secret (model.auth.secret_ref)."
+                )
+                error_code = "gated_dataset_auth_required"
+            else:
+                error_message = f"Evaluation failed: {type(e).__name__}"
+                error_code = "evaluation_failed"
 
             # Report failure
             callbacks.report_status(
@@ -412,11 +471,11 @@ class LMEvalAdapter(FrameworkAdapter):
                     phase=JobPhase.COMPLETED,
                     progress=0.0,
                     message=_status_message(
-                        "Evaluation failed", code="evaluation_failed"
+                        "Evaluation failed", code=error_code
                     ),
                     error=ErrorInfo(
-                        message=str(e),
-                        message_code="evaluation_failed",
+                        message=error_message,
+                        message_code=error_code,
                     ),
                     error_details={"exception_type": type(e).__name__},
                 )
