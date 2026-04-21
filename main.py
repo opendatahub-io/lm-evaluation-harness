@@ -11,6 +11,9 @@ Optional environment variables:
 - EVALHUB_JOB_SPEC_PATH: path to the job spec JSON (defaults to `meta/job.json`)
 - REGISTRY_USERNAME: Registry username (optional)
 - REGISTRY_PASSWORD: Registry password/token (optional)
+- HF_ENDPOINT: Hugging Face Hub API base (``huggingface_hub``). EvalHub sets this on the adapter
+  container to ``{sidecar_base}/huggingface`` (same host as the sidecar ``/model`` proxy). If unset
+  (e.g. manual runs), the adapter may derive it from ``callback_url`` in the job spec (sidecar base).
 """
 
 import json
@@ -22,6 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import evalhub
 from evalhub.adapter import (
     DefaultCallbacks,
     EvaluationResult,
@@ -36,7 +40,6 @@ from evalhub.adapter import (
     MessageInfo,
     OCIArtifactSpec,
 )
-from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
 
 from lm_eval import simple_evaluate
 from lm_eval.tasks import TaskManager
@@ -49,6 +52,21 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger(__name__)
+
+
+def _log_evalhub_sdk_install() -> None:
+    """Log which eval-hub-sdk is loaded (verify Docker/local editable install)."""
+    dbg = getattr(evalhub, "sdk_install_debug_info", None)
+    if callable(dbg):
+        ver, root = dbg()
+    else:
+        ver = getattr(evalhub, "__version__", "unknown")
+        root = str(getattr(evalhub, "__file__", ""))
+    logger.info(
+        "EVALHUB_SDK_INSTALL_DEBUG: version=%s package_path=%s",
+        ver,
+        root,
+    )
 
 
 def _jsonable(value: Any) -> Any:
@@ -153,6 +171,63 @@ def build_lmeval_config(job_spec: JobSpec) -> tuple[str, dict, str | None]:
     )
 
 
+def hf_endpoint_via_sidecar(callback_url: str) -> str | None:
+    """Fallback when ``HF_ENDPOINT`` is unset: ``{callback_url}/huggingface``.
+
+    EvalHub sets ``job.callback_url`` to the sidecar HTTP base (same value as ``sidecarBaseURL``), not
+    a separate EvalHub API URL — so Hub traffic uses the same host/port as callbacks, with path
+    ``/huggingface`` on eval-runtime-sidecar.
+    """
+    base = (callback_url or "").strip().rstrip("/")
+    if not base:
+        return None
+    return f"{base}/huggingface"
+
+
+def apply_hf_hub_endpoint(endpoint: str) -> None:
+    """Sync Hub base URL to ``os.environ``, ``huggingface_hub.constants``, and ``datasets.config``.
+
+    ``huggingface_hub`` and ``datasets`` snapshot ``HF_ENDPOINT`` at import time. Setting
+    ``os.environ`` later (e.g. from the job spec) does not update those module-level values, so
+    dataset downloads could still target ``https://huggingface.co`` instead of the sidecar proxy.
+    """
+    ep = endpoint.rstrip("/")
+    os.environ["HF_ENDPOINT"] = ep
+
+    import huggingface_hub.constants as hf_constants
+
+    hf_constants.ENDPOINT = ep
+    hf_constants.HUGGINGFACE_CO_URL_TEMPLATE = (
+        ep + "/{repo_id}/resolve/{revision}/{filename}"
+    )
+
+    import datasets.config as datasets_config
+
+    datasets_config.HF_ENDPOINT = ep
+    datasets_config.HUB_DATASETS_URL = (
+        ep + "/datasets/{repo_id}/resolve/{revision}/{path}"
+    )
+
+
+def ensure_hf_hub_endpoint_for_job(config: JobSpec) -> None:
+    """Resolve Hub base from env or ``callback_url`` and apply via :func:`apply_hf_hub_endpoint`."""
+    if config.parameters.get("offline"):
+        return
+    ep = (os.environ.get("HF_ENDPOINT") or "").strip()
+    if not ep:
+        derived = hf_endpoint_via_sidecar(str(config.callback_url or ""))
+        if derived:
+            ep = derived
+    if not ep:
+        logger.warning(
+            "HF_ENDPOINT is unset and could not be derived from callback_url; "
+            "Hub downloads may require direct access to huggingface.co."
+        )
+        return
+    apply_hf_hub_endpoint(ep)
+    logger.info("Hugging Face Hub endpoint (datasets + huggingface_hub): %s", ep)
+
+
 class LMEvalAdapter(FrameworkAdapter):
     """LM Evaluation Harness adapter for EvalHub.
 
@@ -207,22 +282,13 @@ class LMEvalAdapter(FrameworkAdapter):
                     test_data_dir,
                 )
 
-            creds = resolve_model_credentials()
-            if creds.api_key:
-                os.environ["OPENAI_API_KEY"] = creds.api_key
-            else:
-                auth_value = creds.auth_headers.get("Authorization", "")
-                if auth_value.startswith("Bearer "):
-                    token = auth_value.replace("Bearer ", "").strip()
-                    os.environ["OPENAI_API_KEY"] = token
+            # Model and Hugging Face credentials are not read in the adapter: eval-runtime-sidecar
+            # injects auth for /model and /huggingface. Optional OPENAI_API_KEY / HF_TOKEN may still be
+            # set via the container environment if your platform provides them.
 
-            # Set HF_TOKEN for gated dataset access (e.g. leaderboard_gpqa).
-            # Priority: HF_TOKEN env var > hf-token in model auth secret.
-            if not os.environ.get("HF_TOKEN"):
-                hf_token = read_model_auth_key("hf-token")
-                if hf_token:
-                    os.environ["HF_TOKEN"] = hf_token
-                    logger.info("HF_TOKEN set from model auth secret (hf-token)")
+            # HF_ENDPOINT: EvalHub sets this on the adapter container env (see eval-hub job_builders).
+            # We also sync huggingface_hub/datasets module-level copies (see apply_hf_hub_endpoint).
+            ensure_hf_hub_endpoint_for_job(config)
 
             job_id = config.id
             benchmark_id = config.benchmark_id
@@ -238,9 +304,6 @@ class LMEvalAdapter(FrameworkAdapter):
             random_seed = int(benchmark_params.get("random_seed", 42))
 
             model_backend, model_args, gen_kwargs = build_lmeval_config(config)
-            if creds.ca_cert_path:
-                # Resolve to a real path so lm_eval accepts it (K8s secret volume mounts expose keys as symlinks).
-                model_args["verify_certificate"] = os.path.realpath(creds.ca_cert_path)
 
             # Phase 1: Initialization
             callbacks.report_status(
@@ -465,8 +528,8 @@ class LMEvalAdapter(FrameworkAdapter):
             if is_gated:
                 error_message = (
                     "Gated HuggingFace dataset error; authentication required. "
-                    "Set HF_TOKEN by adding an 'hf-token' key to your "
-                    "model auth secret (model.auth.secret_ref)."
+                    "Configure HF access on eval-runtime-sidecar (e.g. hf-token via model auth secret) "
+                    "or set HF_TOKEN / HF_ENDPOINT in the environment as appropriate."
                 )
                 error_code = "gated_dataset_auth_required"
             else:
@@ -503,7 +566,7 @@ def main() -> int:
     Returns:
         int: Exit code (0 for success, 1 for failure)
     """
-    import os
+    _log_evalhub_sdk_install()
 
     try:
         # Create adapter with job spec path from environment or default
