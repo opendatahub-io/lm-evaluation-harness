@@ -1,10 +1,12 @@
 import abc
 import ast
 import logging
+import os
 import random
 import re
 from collections.abc import Callable
-from copy import deepcopy
+from pathlib import Path
+from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
 from inspect import getsource
 from typing import (
@@ -21,6 +23,7 @@ from typing import (
 )
 
 import datasets
+from datasets import DownloadConfig
 import numpy as np
 from tqdm import tqdm
 
@@ -49,6 +52,55 @@ ALL_OUTPUT_TYPES = [
 ]
 
 eval_logger = logging.getLogger(__name__)
+
+_HUB_PARQUET_SPLITS = (
+    ("train", "train*.parquet"),
+    ("validation", "validation*.parquet"),
+    ("test", "test*.parquet"),
+)
+
+
+def _try_offline_parquet_from_hub_snapshot(
+    hf_home: str, dataset_path: str, dataset_name: Optional[str]
+) -> Any:
+    """Load DatasetDict from local Hub parquet under HF_HOME, skipping ``dataset_module_factory``.
+
+    Walks ``hub/datasets--<id>/snapshots/<revision>/<dataset_name>/`` for both ``org/name``
+    paths (e.g. ``allenai/ai2_arc``) and short Hub ids (e.g. ``blimp``, ``gsm8k``). Loads every
+    split that has at least one matching parquet file (``train*``, ``validation*``, ``test*``).
+
+    Avoids ``OfflineModeIsEnabled`` failures when ``DownloadConfig(local_files_only=True)`` alone
+    still triggers Hub resolution inside ``datasets``.
+    """
+    if not dataset_name or not dataset_path:
+        return None
+    snapshots_root = (
+        Path(hf_home) / "hub" / f"datasets--{dataset_path.replace('/', '--')}" / "snapshots"
+    )
+    if not snapshots_root.is_dir():
+        return None
+    for snapshot in sorted(snapshots_root.iterdir(), reverse=True):
+        if not snapshot.is_dir():
+            continue
+        subset_dir = snapshot / dataset_name
+        if not subset_dir.is_dir():
+            continue
+        data_files: Dict[str, List[str]] = {}
+        for split, pattern in _HUB_PARQUET_SPLITS:
+            shards = sorted(subset_dir.glob(pattern))
+            if shards:
+                data_files[split] = [str(p) for p in shards]
+        if not data_files:
+            continue
+        eval_logger.info(
+            "Offline: Hub snapshot parquet for %s (%s) at %s splits=%s",
+            dataset_path,
+            dataset_name,
+            subset_dir,
+            list(data_files.keys()),
+        )
+        return datasets.load_dataset("parquet", data_files=data_files)
+    return None
 
 
 @dataclass
@@ -931,10 +983,35 @@ class ConfigurableTask(Task):
                     )
 
     def download(self, dataset_kwargs: Optional[Dict[str, Any]] = None) -> None:
+        kwargs = dict(dataset_kwargs if dataset_kwargs is not None else {})
+        offline = (
+            os.environ.get("HF_DATASETS_OFFLINE") == "1"
+            or os.environ.get("HF_HUB_OFFLINE") == "1"
+        )
+        if offline:
+            hf_home = os.environ.get("HF_HOME", "/test_data")
+            parquet_ds = _try_offline_parquet_from_hub_snapshot(
+                hf_home, self.DATASET_PATH, self.DATASET_NAME
+            )
+            if parquet_ds is not None:
+                self.dataset = parquet_ds
+                return
+
+            existing = kwargs.get("download_config")
+            if existing is None:
+                dc = DownloadConfig(local_files_only=True)
+            else:
+                try:
+                    dc = copy(existing)
+                    dc.local_files_only = True
+                except Exception:
+                    dc = DownloadConfig(local_files_only=True)
+            kwargs["download_config"] = dc
+
         self.dataset = datasets.load_dataset(
             path=self.DATASET_PATH,
             name=self.DATASET_NAME,
-            **dataset_kwargs if dataset_kwargs is not None else {},
+            **kwargs,
         )
 
     def has_training_docs(self) -> bool:
