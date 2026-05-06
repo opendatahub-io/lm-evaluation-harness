@@ -55,9 +55,43 @@ eval_logger = logging.getLogger(__name__)
 
 _HUB_PARQUET_SPLITS = (
     ("train", "train*.parquet"),
+    ("dev", "dev*.parquet"),
     ("validation", "validation*.parquet"),
     ("test", "test*.parquet"),
 )
+
+
+def _is_safe_snapshot_segment(value: str) -> bool:
+    """Reject absolute paths, parent traversal, and path separators."""
+    if not value:
+        return False
+    if value in {".", ".."}:
+        return False
+    if "/" in value or "\\" in value:
+        return False
+    p = Path(value)
+    if p.is_absolute():
+        return False
+    if any(part in {".", ".."} for part in p.parts):
+        return False
+    return True
+
+
+def _datasets_hub_dir_name(dataset_path: str) -> Optional[str]:
+    """Normalize a HF dataset id to its Hub cache directory name.
+
+    Accepts ids like "blimp" or "allenai/ai2_arc". Rejects absolute paths and traversal segments.
+    """
+    if not dataset_path:
+        return None
+    if dataset_path.startswith(("/", "\\")) or dataset_path.endswith(("/", "\\")):
+        return None
+    if "\\" in dataset_path:
+        return None
+    parts = dataset_path.split("/")
+    if any(not part or part in {".", ".."} for part in parts):
+        return None
+    return "datasets--" + dataset_path.replace("/", "--")
 
 
 def _try_offline_parquet_from_hub_snapshot(
@@ -74,15 +108,44 @@ def _try_offline_parquet_from_hub_snapshot(
     """
     if not dataset_name or not dataset_path:
         return None
-    snapshots_root = (
-        Path(hf_home) / "hub" / f"datasets--{dataset_path.replace('/', '--')}" / "snapshots"
-    )
+    if not _is_safe_snapshot_segment(dataset_name):
+        eval_logger.warning(
+            "Offline: refusing unsafe dataset_name for parquet snapshot load: %r", dataset_name
+        )
+        return None
+    hub_dir = _datasets_hub_dir_name(dataset_path)
+    if hub_dir is None:
+        eval_logger.warning(
+            "Offline: refusing unsafe dataset_path for parquet snapshot load: %r", dataset_path
+        )
+        return None
+    snapshots_root = Path(hf_home) / "hub" / hub_dir / "snapshots"
     if not snapshots_root.is_dir():
         return None
-    for snapshot in sorted(snapshots_root.iterdir(), reverse=True):
+    snapshots_root_resolved = snapshots_root.resolve()
+    # Snapshot directory names are typically revision SHAs; reverse lexicographic order is not
+    # a reliable proxy for recency. Prefer filesystem mtime (newest first).
+    snapshot_dirs = [p for p in snapshots_root.iterdir() if p.is_dir()]
+    snapshot_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for snapshot in snapshot_dirs:
         if not snapshot.is_dir():
             continue
-        subset_dir = snapshot / dataset_name
+        snapshot_root = snapshot.resolve()
+        try:
+            snapshot_root.relative_to(snapshots_root_resolved)
+        except ValueError:
+            continue
+
+        subset_dir = (snapshot_root / dataset_name).resolve()
+        try:
+            subset_dir.relative_to(snapshot_root)
+        except ValueError:
+            eval_logger.warning(
+                "Offline: refusing dataset_name path traversal: %r (snapshot=%s)",
+                dataset_name,
+                snapshot_root,
+            )
+            continue
         if not subset_dir.is_dir():
             continue
         data_files: Dict[str, List[str]] = {}
@@ -317,12 +380,31 @@ class Task(abc.ABC):
             - `datasets.DownloadMode.FORCE_REDOWNLOAD`
                 Fresh download and fresh dataset.
         """
+        offline = (
+            os.environ.get("HF_DATASETS_OFFLINE") == "1"
+            or os.environ.get("HF_HUB_OFFLINE") == "1"
+        )
+        if offline:
+            hf_home = os.environ.get("HF_HOME", "/test_data")
+            parquet_ds = _try_offline_parquet_from_hub_snapshot(
+                hf_home, self.DATASET_PATH, self.DATASET_NAME
+            )
+            if parquet_ds is not None:
+                self.dataset = parquet_ds
+                return
+
+        kwargs: Dict[str, Any] = {
+            "data_dir": data_dir,
+            "cache_dir": cache_dir,
+            "download_mode": download_mode,
+        }
+        if offline:
+            kwargs["download_config"] = DownloadConfig(local_files_only=True)
+
         self.dataset = datasets.load_dataset(
             path=self.DATASET_PATH,
             name=self.DATASET_NAME,
-            data_dir=data_dir,
-            cache_dir=cache_dir,
-            download_mode=download_mode,
+            **kwargs,
         )
 
     @property
@@ -1004,7 +1086,11 @@ class ConfigurableTask(Task):
                 try:
                     dc = copy(existing)
                     dc.local_files_only = True
-                except Exception:
+                except (TypeError, AttributeError) as exc:
+                    eval_logger.warning(
+                        "Offline: failed to copy existing download_config (%s); falling back to local_files_only DownloadConfig",
+                        exc,
+                    )
                     dc = DownloadConfig(local_files_only=True)
             kwargs["download_config"] = dc
 

@@ -36,7 +36,13 @@ def _job_spec_file_requests_offline() -> bool:
         with open(path, encoding="utf-8") as f:
             spec = json.load(f)
         return bool(spec.get("parameters", {}).get("offline"))
-    except (OSError, json.JSONDecodeError, TypeError):
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError, TypeError) as exc:
+        print(
+            f"WARNING: failed to read job spec for offline mode from {path!r}: {exc}",
+            file=sys.stderr,
+        )
         return False
 
 
@@ -44,12 +50,12 @@ def configure_hf_offline_environment(hf_home: str) -> None:
     """Use local Hugging Face caches only (disconnected / no huggingface.co).
 
     Pin Hub/datasets cache dirs under hf_home so lookups match /test_data layout after init sync.
-    setdefault allows explicit HF_*_CACHE in the pod env to override.
+    HF_HOME, HF_HUB_CACHE and HF_DATASETS_CACHE are set consistently so they stay aligned.
     """
     root = Path(hf_home)
     os.environ["HF_HOME"] = str(root)
-    os.environ.setdefault("HF_HUB_CACHE", str(root / "hub"))
-    os.environ.setdefault("HF_DATASETS_CACHE", str(root / "datasets"))
+    os.environ["HF_HUB_CACHE"] = str(root / "hub")
+    os.environ["HF_DATASETS_CACHE"] = str(root / "datasets")
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
     os.environ["HF_EVALUATE_OFFLINE"] = "1"
@@ -81,8 +87,10 @@ from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
 
 _seed_hf_offline_before_lm_eval_import()
 
-from lm_eval import simple_evaluate
-from lm_eval.tasks import TaskManager
+# NOTE: keep these imports after _seed_hf_offline_before_lm_eval_import() so HF offline env vars
+# are set before lm_eval (and Hugging Face libraries) are imported.
+from lm_eval import simple_evaluate  # noqa: E402
+from lm_eval.tasks import TaskManager  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
