@@ -595,7 +595,10 @@ class LMEvalAdapter(FrameworkAdapter):
 
             # For group tasks (e.g. leaderboard_bbh), lm-eval stores metrics under
             # subtask names, not the group name. Fall back to averaging subtask results.
-            if not any(k.endswith(",none") for k in task_results):
+            # lm-eval stores each metric as "metric_name,filter_name" where filter_name
+            # is "none" for unfiltered tasks or a named filter (e.g. "flexible-extract",
+            # "get-answer") for tasks that post-process model outputs.
+            if not any("," in k for k in task_results):
                 group_subtasks = results.get("group_subtasks", {}).get(benchmark_id, [])
                 if group_subtasks:
                     logger.info(
@@ -608,11 +611,11 @@ class LMEvalAdapter(FrameworkAdapter):
                     subtask_count: dict[str, int] = {}
                     for subtask in group_subtasks:
                         for metric_name, metric_value in all_results.get(subtask, {}).items():
-                            if not metric_name.endswith(",none"):
+                            if "," not in metric_name:
                                 continue
                             if metric_value == "N/A" or metric_value is None:
                                 continue
-                            clean = metric_name.replace(",none", "")
+                            clean, _, _ = metric_name.rpartition(",")
                             subtask_metrics[clean] = subtask_metrics.get(clean, 0) + float(metric_value)
                             subtask_count[clean] = subtask_count.get(clean, 0) + 1
                     task_results = {
@@ -621,30 +624,38 @@ class LMEvalAdapter(FrameworkAdapter):
                     }
 
             # Build evaluation results
+            # Collect candidates keyed by clean metric name; prefer the "none" (unfiltered)
+            # value when the same metric appears under multiple filter names.
+            metric_candidates: dict[str, tuple[float, str]] = {}  # name -> (value, filter)
+            for metric_name, metric_value in task_results.items():
+                if "," not in metric_name:
+                    continue
+                clean_metric, _, filter_name = metric_name.rpartition(",")
+                if metric_value == "N/A" or metric_value is None:
+                    logger.warning(
+                        "Metric %s has value N/A, skipping",
+                        clean_metric,
+                    )
+                    continue
+                try:
+                    value = float(metric_value)
+                except (TypeError, ValueError):
+                    continue
+                existing = metric_candidates.get(clean_metric)
+                if existing is None or filter_name == "none":
+                    metric_candidates[clean_metric] = (value, filter_name)
+
             evaluation_results = []
             overall_score = None
-
-            for metric_name, metric_value in task_results.items():
-                if metric_name.endswith(",none"):
-                    # Primary metric (usually accuracy or similar)
-                    clean_metric = metric_name.replace(",none", "")
-                    # lm-eval returns 'N/A' for metrics it cannot compute
-                    # (e.g. when the model produces unparseable outputs).
-                    if metric_value == "N/A" or metric_value is None:
-                        logger.warning(
-                            "Metric %s has value N/A, skipping",
-                            clean_metric,
-                        )
-                        continue
-                    evaluation_results.append(
-                        EvaluationResult(
-                            metric_name=clean_metric,
-                            metric_value=float(metric_value),
-                        )
+            for clean_metric, (value, _) in metric_candidates.items():
+                evaluation_results.append(
+                    EvaluationResult(
+                        metric_name=clean_metric,
+                        metric_value=value,
                     )
-                    # Use first primary metric as overall score
-                    if overall_score is None:
-                        overall_score = float(metric_value)
+                )
+                if overall_score is None:
+                    overall_score = value
 
             # Get number of examples evaluated
             samples = results.get("samples", {}).get(benchmark_id, [])
