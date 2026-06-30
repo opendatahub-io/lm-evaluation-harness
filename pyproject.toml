@@ -93,6 +93,8 @@ tasks = [
     "lm_eval[multilingual]",
     "lm_eval[ruler]",
 ]
+# Red Hat OpenShift AI specific dependencies
+rhoai = ["eval-hub-sdk[adapter]==0.4.2"]
 
 [dependency-groups]
 dev = [
