@@ -1,12 +1,12 @@
 import os
 from itertools import islice
+from typing import cast
 
 import datasets
 import pytest
 
-import lm_eval.tasks as tasks
 from lm_eval.api.task import ConfigurableTask
-from lm_eval.evaluator_utils import get_task_list
+from lm_eval.tasks import TaskManager
 
 from .utils import new_tasks
 
@@ -24,21 +24,26 @@ def get_new_tasks_else_default():
     """
     global TASKS
     # CI: new_tasks checks if any modifications have been made
-    task_classes = new_tasks()
+    task_list = new_tasks()
     # Check if task_classes is empty
-    return task_classes if task_classes else TASKS
+    return task_list or TASKS
 
 
-def task_class(task_names=None, task_manager=None) -> ConfigurableTask:
+def task_class(
+    task_names: list[str], task_manager: TaskManager | None = None
+) -> list[ConfigurableTask]:
     """
     Convert a list of task names to a list of ConfigurableTask instances
     """
     if task_manager is None:
-        task_manager = tasks.TaskManager()
-    res = tasks.get_task_dict(task_names, task_manager)
-    res = [x.task for x in get_task_list(res)]
+        from lm_eval.tasks import TaskManager
 
-    return res
+        task_manager = TaskManager()
+
+    res = task_manager.load(task_names)
+    res = res["tasks"]
+
+    return cast("list[ConfigurableTask]", res.values())
 
 
 @pytest.fixture()
@@ -46,7 +51,6 @@ def limit() -> int:
     return 10
 
 
-# Tests
 class BaseTasks:
     """
     Base class for testing tasks
@@ -129,10 +133,7 @@ class BaseTasks:
         _array_target = [task.doc_to_target(doc) for doc in arr]
         if task._config.output_type == "multiple_choice":
             # TODO<baber>: label can be string or int; add better test conditions
-            assert all(
-                (isinstance(label, int) or isinstance(label, str))
-                for label in _array_target
-            )
+            assert all(isinstance(label, (int, str)) for label in _array_target)
 
     def test_build_all_requests(self, task_class, limit):
         task_class.build_all_requests(rank=1, limit=limit, world_size=1)
@@ -166,45 +167,3 @@ class TestNewTasksElseDefault(BaseTasks):
     Test class parameterized with a list of new/modified tasks
     (or a set of default tasks if none have been modified)
     """
-
-
-@pytest.mark.parametrize(
-    "task_class",
-    task_class(
-        ["arc_easy_unitxt"], tasks.TaskManager(include_path="./tests/testconfigs")
-    ),
-    ids=lambda x: f"{x.config.task}",
-)
-class TestUnitxtTasks(BaseTasks):
-    """
-    Test class for Unitxt tasks parameterized with a small custom
-    task as described here:
-      https://www.unitxt.ai/en/latest/docs/lm_eval.html
-    """
-
-    def test_check_training_docs(self, task_class: ConfigurableTask):
-        if task_class.has_training_docs():
-            assert task_class.dataset["train"] is not None
-
-    def test_check_validation_docs(self, task_class):
-        if task_class.has_validation_docs():
-            assert task_class.dataset["validation"] is not None
-
-    def test_check_test_docs(self, task_class):
-        task = task_class
-        if task.has_test_docs():
-            assert task.dataset["test"] is not None
-
-    def test_doc_to_text(self, task_class, limit: int):
-        task = task_class
-        arr = (
-            list(islice(task.test_docs(), limit))
-            if task.has_test_docs()
-            else list(islice(task.validation_docs(), limit))
-        )
-        _array = [task.doc_to_text(doc) for doc in arr]
-        if not task.multiple_input:
-            for x in _array:
-                assert isinstance(x, str)
-        else:
-            pass

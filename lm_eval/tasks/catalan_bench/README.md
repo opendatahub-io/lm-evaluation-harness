@@ -23,14 +23,18 @@ The datasets included in CatalanBench that have been made public in previous pub
 | caBREU | Summarization | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/caBreu |
 | CatalanQA | Question Answering | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/catalanqa |
 | CatCoLA | Linguistic Acceptability | CatCoLA: Catalan Corpus of Linguistic Acceptability | https://huggingface.co/datasets/nbel/CatCoLA |
+| Cocoteros_va | Commonsense Reasoning | COCOTEROS_VA: Valencian translation of the COCOTEROS Spanish dataset | https://huggingface.co/datasets/gplsi/cocoteros_va |
+ | EsCoLA | Linguistic Acceptability | [EsCoLA: Spanish Corpus of Linguistic Acceptability](https://aclanthology.org/2024.lrec-main.554/) |
 | COPA-ca | Commonsense Reasoning | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/COPA-ca |
 | CoQCat | Question Answering | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/CoQCat |
 | FLORES_ca | Translation | [The FLORES-101  Evaluation Benchmark for Low-Resource and Multilingual Machine Translation](https://arxiv.org/abs/2106.03193) | https://huggingface.co/datasets/facebook/flores |
 | PAWS-ca | Paraphrasing | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/PAWS-ca |
 | TE-ca | Natural Language Inference | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/teca |
+| TruthfulQA_va | Truthfulness | TruthfulQA: Measuring How Models Mimic Human Falsehoods: The case of Valencian | https://huggingface.co/datasets/gplsi/truthfulqa_va |
 | VeritasQA_ca | Truthfulness | VeritasQA: A Truthfulness Benchmark Aimed at Multilingual Transferability | TBA |
 | WNLI-ca | Natural Language Inference | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/wnli-ca |
 | XNLI-ca | Natural Language Inference | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/xnli-ca |
+| XNLI-va | Natural Language Inference | Building a Data Infrastructure for a Mid-Resource Language: The Case of Valencian | https://huggingface.co/datasets/gplsi/xnli_va |
 | XQuAD-ca | Question Answering | [Building a Data Infrastructure for a Mid-Resource Language: The Case of Catalan](https://aclanthology.org/2024.lrec-main.231/) | https://huggingface.co/datasets/projecte-aina/xquad-ca |
 
 
@@ -91,6 +95,7 @@ The following tasks evaluate tasks on CatalanBench dataset using various scoring
   - `cabreu`
   - `catalanqa`
   - `catcola`
+  - `cocoteros_va`
   - `copa_ca`
   - `coqcat`
   - `flores_ca`
@@ -118,11 +123,13 @@ The following tasks evaluate tasks on CatalanBench dataset using various scoring
   - `piqa_ca`
   - `siqa_ca`
   - `teca`
+  - `truthfulqa_va`
   - `veritasqa_gen_ca`
   - `veritasqa_mc1_ca`
   - `veritasqa_mc2_ca`
   - `wnli_ca`
   - `xnli_ca`
+  - `xnli_va`
   - `xquad_ca`
   - `xstorycloze_ca`
 
@@ -141,3 +148,10 @@ If other tasks on this dataset are already supported:
 * [ ] Is the "Main" variant of this task clearly denoted?
 * [ ] Have you provided a short sentence in a README on what each new variant adds / evaluates?
 * [ ] Have you noted which, if any, published evaluation setups are matched by this variant?
+
+
+### Changelog
+version 2.0: (2025-Mar-18) add [`cococteros_va`](./cocoteros_va.yaml) task.
+version 2.1: (2025-Jul-30) add [`xnli_va`](./xnli_va.yaml) task.
+version 2.2: (2025-Jul-30) add [`truthfulqa_va`](./truthfulqa_va/truthfulqa_va.yaml) task.
+version 2.3: (2026-Jan-16) exclude line breaks from stop criteria in `mgsm_direct_ca`
