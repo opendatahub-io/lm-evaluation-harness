@@ -209,7 +209,7 @@ COPY . .
 COPY requirements.txt .
 
 # Install the pinned dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -c requirements/constraints.txt -r requirements.txt
 
 # Install the package
 RUN pip install --no-cache-dir --no-deps -e .
