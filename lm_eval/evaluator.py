@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import os
 import random
 import time
 from collections import defaultdict
@@ -63,7 +64,7 @@ def simple_evaluate(
     cache_requests: bool = False,
     rewrite_requests_cache: bool = False,
     delete_requests_cache: bool = False,
-    limit: int | float | None = None,
+    limit: float | None = None,
     samples: dict[str, list[int]] | None = None,
     bootstrap_iters: int = 100000,
     check_integrity: bool = False,
@@ -223,8 +224,8 @@ def simple_evaluate(
         if isinstance(gen_kwargs, str):
             gen_kwargs = simple_parse_args_string(gen_kwargs)
         eval_logger.warning(
-            f"generation_kwargs: {gen_kwargs} specified through cli, these settings will update set parameters in yaml tasks. "
-            "Ensure 'do_sample=True' for non-greedy decoding!"
+            "generation_kwargs: %s specified through cli, these settings will update set parameters in yaml tasks. Ensure 'do_sample=True' for non-greedy decoding!",
+            gen_kwargs,
         )
         if not gen_kwargs:
             gen_kwargs = None
@@ -236,7 +237,7 @@ def simple_evaluate(
 
         if isinstance(model_args, dict):
             eval_logger.info(
-                f"Initializing {model} model, with arguments: {model_args}"
+                "Initializing %s model, with arguments: %s", model, model_args
             )
             lm = lm_eval.api.registry.get_model(model).create_from_arg_obj(
                 model_args,
@@ -269,15 +270,21 @@ def simple_evaluate(
         eval_logger.info("Using pre-initialized model")
         lm = model
 
+    # Under TP launchers (torchrun) every rank reports lm.rank==0; fall back to
+    # LOCAL_RANK so each process gets its own cache db and only LOCAL_RANK==0
+    # performs final result aggregation / I/O.
+    cache_rank = lm.rank or int(os.environ.get("LOCAL_RANK", "0"))
     if use_cache is not None:
-        eval_logger.info(f"Using cache at {use_cache + '_rank' + str(lm.rank) + '.db'}")
+        eval_logger.info(
+            f"Using cache at {use_cache + '_rank' + str(cache_rank) + '.db'}"
+        )
         lm = lm_eval.api.model.CachingLM(
             lm,
             use_cache
             # each rank receives a different cache db.
             # necessary to avoid multiple writes to cache at once
             + "_rank"
-            + str(lm.rank)
+            + str(cache_rank)
             + ".db",
         )
 
@@ -310,7 +317,8 @@ def simple_evaluate(
 
         if predict_only:
             eval_logger.info(
-                f"Processing {task_name} in output-only mode. Metrics will not be calculated!"
+                "Processing %s in output-only mode. Metrics will not be calculated!",
+                task_name,
             )
             # we have to change the class properties post-hoc. This is pretty hacky.
             task_obj.override_metric(metric_name="bypass")
@@ -320,11 +328,15 @@ def simple_evaluate(
         if num_fewshot is not None:
             if (default_num_fewshot := task_obj.get_config("num_fewshot")) == 0:
                 eval_logger.info(
-                    f"num_fewshot has been set to 0 for {task_name} in its config. Manual configuration will be ignored."
+                    "num_fewshot has been set to 0 for %s in its config. Manual configuration will be ignored.",
+                    task_name,
                 )
             else:
                 eval_logger.warning(
-                    f"Overwriting default num_fewshot of {task_name} from {default_num_fewshot} to {num_fewshot}"
+                    "Overwriting default num_fewshot of %s from %s to %s",
+                    task_name,
+                    default_num_fewshot,
+                    num_fewshot,
                 )
                 task_obj.set_config(key="num_fewshot", value=num_fewshot)
         else:
@@ -367,7 +379,10 @@ def simple_evaluate(
     if verbosity is not None:
         setup_logging(verbosity=verbosity)
 
-    if lm.rank == 0:
+    # `lm.rank == 0` covers DP / single-process; `LOCAL_RANK == 0` covers TP
+    # (torchrun), where every rank reports rank==0 but only one process should
+    # build/return results so callers don't duplicate file writes.
+    if lm.rank == 0 and int(os.environ.get("LOCAL_RANK", "0")) == 0:
         if isinstance(model, str):
             model_name = model
         elif hasattr(model, "config") and hasattr(model.config, "_name_or_path"):
@@ -464,7 +479,6 @@ def evaluate(
     Returns:
         dict | None: Dictionary of results, or None if not on rank 0.
     """
-
     if limit is not None and samples is not None:
         raise ValueError(
             "Either 'limit' or 'samples' must be None, but both are not None."
@@ -572,7 +586,7 @@ def evaluate(
     ### Run LM on inputs, get all outputs ###
     # execute each type of request
     for reqtype, reqs in requests.items():
-        eval_logger.info(f"Running {reqtype} requests")
+        eval_logger.info("Running %s requests", reqtype)
         # create `K` copies of each request `req` based off `K = req.repeats`
         cloned_reqs = []
         for req in reqs:
