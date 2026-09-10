@@ -24,6 +24,7 @@ files and do not call the Hub. You do not need ``parameters.offline``.
 
 import json
 import logging
+import math
 import os
 import re
 import requests
@@ -33,7 +34,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+
 _TEST_DATA_DIR = "/test_data"
+
+
+def _get_lmeval_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        return version("lm_eval")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 # EvalHub mounts the job spec JSON under this directory only; reject other paths (CWE-22).
 _JOB_SPEC_ALLOWED_ROOT = Path("/meta")
 
@@ -215,7 +227,6 @@ def _seed_hf_offline_before_lm_eval_import() -> None:
 
 from evalhub.adapter import (
     DefaultCallbacks,
-    ErrorInfo,
     EvaluationResult,
     FrameworkAdapter,
     JobCallbacks,
@@ -227,6 +238,7 @@ from evalhub.adapter import (
     MessageInfo,
     OCIArtifactSpec,
 )
+from evalhub.models import MetricSchema, ResultType
 from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
 
 
@@ -236,6 +248,25 @@ _seed_hf_offline_before_lm_eval_import()
 # are set before lm_eval (and Hugging Face libraries) are imported.
 from lm_eval import simple_evaluate  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
+
+# Eval-hub catalog IDs that differ from lm-eval task names. Tags (e.g. winogender) expand
+# to multiple subtasks without a group_subtasks entry, so results are not keyed by the
+# catalog id unless mapped to a single task (winogender_all = full Winogender set).
+_BENCHMARK_TO_LMEVAL_TASK: dict[str, str] = {
+    "winogender": "winogender_all",
+}
+
+
+def _resolve_lmeval_task(benchmark_id: str, task_manager: TaskManager) -> str:
+    """Map eval-hub benchmark_id to the lm-eval task name used for evaluate + results."""
+    if benchmark_id in _BENCHMARK_TO_LMEVAL_TASK:
+        return _BENCHMARK_TO_LMEVAL_TASK[benchmark_id]
+    if task_manager._name_is_tag(benchmark_id):
+        raise ValueError(
+            f"Benchmark {benchmark_id!r} is an lm-eval tag, not a task; "
+            f"add a mapping in _BENCHMARK_TO_LMEVAL_TASK"
+        )
+    return benchmark_id
 
 
 # Configure logging
@@ -258,12 +289,25 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def _status_message(text: str, code: str = "status_update") -> MessageInfo:
-    return MessageInfo(message=text, message_code=code)
+def _to_finite_float(metric_value: Any) -> float | None:
+    """Return a finite float, or None for N/A / non-numeric / NaN / Inf.
+
+    BBQ category bias aggregators return NaN when a category has no examples
+    (common with num_examples/limit); those must not become EvaluationResults.
+    """
+    if metric_value == "N/A" or metric_value is None:
+        return None
+    try:
+        value = float(metric_value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def _sanitize_error_message(msg: str) -> str:
-    """Redact secrets from error text before Eval Hub callbacks (ErrorInfo.message)."""
+    """Redact secrets from error text before Eval Hub callbacks."""
     s = msg
 
     # Authorization header / Bearer fragments (case-insensitive)
@@ -351,6 +395,158 @@ def _evaluation_failure_for_evalhub(exc: BaseException) -> tuple[str, str]:
         _sanitize_error_message(f"Evaluation failed: {error_str}"),
         "evaluation_failed",
     )
+
+
+def _build_additional_info(
+    lmeval_results: dict,
+    benchmark_id: str,
+    benchmark_params: dict,
+    model_args: dict,
+    num_fewshot: int,
+    random_seed: int,
+    hf_offline: bool,
+    overall_score: float | None,
+) -> dict[str, Any]:
+    """Build the additional_info dict from lm-eval results and run configuration.
+
+    Collects all supplementary metadata for the EvalCard. Extracting this
+    into a standalone function keeps run_benchmark_job readable and allows the
+    logic to be unit-tested independently.
+    """
+    global_cfg = lmeval_results.get("config", {})
+    task_cfg = lmeval_results.get("configs", {}).get(benchmark_id, {})
+    n_samples = lmeval_results.get("n-samples", {}).get(benchmark_id, {})
+    fewshot_cfg = task_cfg.get("fewshot_config") or {}
+
+    # Primary metric — first entry in metric_list; falls back to subtask for group tasks
+    metric_list = task_cfg.get("metric_list") or []
+    if not metric_list:
+        subtasks = lmeval_results.get("group_subtasks", {}).get(benchmark_id, [])
+        if subtasks:
+            first_subtask_cfg = lmeval_results.get("configs", {}).get(subtasks[0], {})
+            metric_list = first_subtask_cfg.get("metric_list") or []
+    primary_metric = metric_list[0].get("metric") if metric_list else None
+
+    # CoT detection — layered heuristic (no single reliable signal in lm-eval)
+    tags = task_cfg.get("tag", [])
+    if isinstance(tags, str):
+        tags = [tags]
+    doc_to_text = str(task_cfg.get("doc_to_text", ""))
+    is_cot = (
+        "chain_of_thought" in tags
+        or "cot" in benchmark_id.lower().replace("-", "_").split("_")
+        or "think step by step" in doc_to_text.lower()
+    )
+
+    is_zero_shot = num_fewshot == 0 and not is_cot
+
+    # alt_prompting_description: human-readable label for non-zero-shot strategies
+    alt_prompting_description = None
+    if not is_zero_shot:
+        parts = []
+        if num_fewshot > 0:
+            parts.append(f"{num_fewshot}-Shot")
+        if is_cot:
+            parts.append("CoT")
+        alt_prompting_description = " ".join(parts) if parts else None
+
+    raw = {
+        # benchmark configuration
+        "num_fewshot": num_fewshot,
+        "random_seed": random_seed,
+        "output_type": task_cfg.get("output_type"),
+        "dataset_split": task_cfg.get("test_split"),
+        "primary_metric": primary_metric,
+        "tags": tags if tags else None,
+        "limit": global_cfg.get("limit"),
+        "gen_kwargs": global_cfg.get("gen_kwargs"),
+        # prompting strategy — score when applicable, None otherwise
+        "zero_shot": overall_score if is_zero_shot else None,
+        "alt_prompting": overall_score if not is_zero_shot else None,
+        "alt_prompting_description": alt_prompting_description,
+        "description": task_cfg.get("description") or None,
+        "system_instruction": fewshot_cfg.get("system_prompt"),
+        # sample counts
+        "num_samples_original": n_samples.get("original"),
+        "num_samples_effective": n_samples.get("effective"),
+        # dataset provenance — list to support group tasks with multiple datasets
+        "dataset": _build_dataset_info(lmeval_results, benchmark_id),
+        "task_version": lmeval_results.get("versions", {}).get(benchmark_id),
+        # runtime / reproducibility
+        "lmeval_version": str(lmeval_results.get("lm_eval_version") or _get_lmeval_version()),
+        "lmeval_git_hash": lmeval_results.get("git_hash"),
+        "evaluation_date": (
+            datetime.fromtimestamp(lmeval_results["date"], tz=UTC).isoformat()
+            if lmeval_results.get("date")
+            else None
+        ),
+        "num_concurrent": model_args.get("num_concurrent"),
+        "batch_size": model_args.get("batch_size"),
+        "tokenizer": model_args.get("tokenizer"),
+        "hf_offline": hf_offline,
+        "timeout_seconds": int(benchmark_params.get("timeout_seconds", 300)),
+    }
+
+    # Exclude fields with None values to keep the output clean
+    return {k: v for k, v in raw.items() if v is not None}
+
+
+def _build_dataset_info(lmeval_results: dict, benchmark_id: str) -> list[dict[str, str]] | None:
+    """Build a list of dataset provenance records for the benchmark.
+
+    For group tasks (multiple subtasks), collects dataset info from each subtask.
+    Each record contains hf_repo, hf_subset, and sha read from local HF cache.
+    Returns None if no dataset info can be determined.
+    """
+    try:
+        from datasets import get_dataset_config_info
+        from datasets.download.download_config import DownloadConfig
+    except ImportError:
+        return None
+
+    sha_re = re.compile(r"@([0-9a-f]{40})")
+    configs = lmeval_results.get("configs", {})
+
+    # Collect task ids to inspect — the benchmark itself plus any subtasks
+    subtasks = lmeval_results.get("group_subtasks", {}).get(benchmark_id, [])
+    task_ids = subtasks if subtasks else [benchmark_id]
+
+    seen = set()
+    records = []
+    for task_id in task_ids:
+        task_cfg = configs.get(task_id, {})
+        dataset_path = task_cfg.get("dataset_path")
+        dataset_name = task_cfg.get("dataset_name")
+        if not dataset_path:
+            continue
+        key = (dataset_path, dataset_name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        sha = None
+        try:
+            info = get_dataset_config_info(
+                dataset_path,
+                config_name=dataset_name,
+                download_config=DownloadConfig(local_files_only=True),
+            )
+            for url in (info.download_checksums or {}):
+                m = sha_re.search(url)
+                if m:
+                    sha = m.group(1)
+                    break
+        except Exception:
+            logger.debug("_build_dataset_info: could not get SHA for %s/%s", dataset_path, dataset_name, exc_info=True)
+
+        record: dict[str, str] = {"hf_repo": dataset_path}
+        if dataset_name:
+            record["hf_subset"] = dataset_name
+        if sha:
+            record["sha"] = sha
+        records.append(record)
+
+    return records if records else None
 
 
 def build_lmeval_config(job_spec: JobSpec) -> tuple[str, dict, str | None]:
@@ -455,7 +651,14 @@ class LMEvalAdapter(FrameworkAdapter):
                           If not provided, uses EVALHUB_JOB_SPEC_PATH env var or default.
         """
         super().__init__(job_spec_path=job_spec_path)
+        self._run_info: dict[str, Any] = {}
         logger.info("LMEval adapter initialized")
+
+    def generate_additional_info(
+        self, results: JobResults
+    ) -> dict[str, Any] | None:
+        """Return lm-eval-specific supplementary metadata captured during the run."""
+        return self._run_info or None
 
     def run_benchmark_job(self, config: JobSpec, callbacks: JobCallbacks) -> JobResults:
         """Run LMEval benchmark with evalhub callbacks.
@@ -525,10 +728,6 @@ class LMEvalAdapter(FrameworkAdapter):
                 JobStatusUpdate(
                     status=JobStatus.RUNNING,
                     phase=JobPhase.INITIALIZING,
-                    progress=0.0,
-                    message=_status_message(
-                        f"Initializing evaluation for {benchmark_id}"
-                    ),
                 )
             )
 
@@ -545,23 +744,24 @@ class LMEvalAdapter(FrameworkAdapter):
                 JobStatusUpdate(
                     status=JobStatus.RUNNING,
                     phase=JobPhase.LOADING_DATA,
-                    progress=0.1,
-                    message=_status_message(
-                        f"Loading benchmark data for {benchmark_id}"
-                    ),
                 )
             )
 
             # Initialize task manager
             task_manager = TaskManager()
+            lmeval_task = _resolve_lmeval_task(benchmark_id, task_manager)
+            if lmeval_task != benchmark_id:
+                logger.info(
+                    "Resolved benchmark %s to lm-eval task %s",
+                    benchmark_id,
+                    lmeval_task,
+                )
 
             # Phase 3: Running evaluation
             callbacks.report_status(
                 JobStatusUpdate(
                     status=JobStatus.RUNNING,
                     phase=JobPhase.RUNNING_EVALUATION,
-                    progress=0.2,
-                    message=_status_message(f"Running evaluation on {model_name}"),
                 )
             )
 
@@ -578,7 +778,7 @@ class LMEvalAdapter(FrameworkAdapter):
                 results = simple_evaluate(
                     model=model_backend,
                     model_args=model_args,
-                    tasks=[benchmark_id],
+                    tasks=[lmeval_task],
                     num_fewshot=int(num_fewshot),
                     device="cpu",
                     limit=num_examples,
@@ -591,19 +791,16 @@ class LMEvalAdapter(FrameworkAdapter):
                 )
             finally:
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = _prev_trust_remote_code
-
             # Phase 4: Post-processing
             callbacks.report_status(
                 JobStatusUpdate(
                     status=JobStatus.RUNNING,
                     phase=JobPhase.POST_PROCESSING,
-                    progress=0.8,
-                    message=_status_message("Processing evaluation results"),
                 )
             )
 
             # Extract results
-            task_results = results.get("results", {}).get(benchmark_id, {})
+            task_results = results.get("results", {}).get(lmeval_task, {})
 
             # For group tasks (e.g. leaderboard_bbh), lm-eval stores metrics under
             # subtask names, not the group name. Fall back to averaging subtask results.
@@ -611,11 +808,11 @@ class LMEvalAdapter(FrameworkAdapter):
             # is "none" for unfiltered tasks or a named filter (e.g. "flexible-extract",
             # "get-answer") for tasks that post-process model outputs.
             if not any("," in k for k in task_results):
-                group_subtasks = results.get("group_subtasks", {}).get(benchmark_id, [])
+                group_subtasks = results.get("group_subtasks", {}).get(lmeval_task, [])
                 if group_subtasks:
                     logger.info(
                         "Benchmark %s is a group task, aggregating %d subtask results",
-                        benchmark_id,
+                        lmeval_task,
                         len(group_subtasks),
                     )
                     all_results = results.get("results", {})
@@ -627,8 +824,11 @@ class LMEvalAdapter(FrameworkAdapter):
                                 continue
                             if metric_value == "N/A" or metric_value is None:
                                 continue
+                            value = _to_finite_float(metric_value)
+                            if value is None:
+                                continue
                             clean, _, _ = metric_name.rpartition(",")
-                            subtask_metrics[clean] = subtask_metrics.get(clean, 0) + float(metric_value)
+                            subtask_metrics[clean] = subtask_metrics.get(clean, 0) + value
                             subtask_count[clean] = subtask_count.get(clean, 0) + 1
                     task_results = {
                         f"{k},none": subtask_metrics[k] / subtask_count[k]
@@ -649,9 +849,8 @@ class LMEvalAdapter(FrameworkAdapter):
                         clean_metric,
                     )
                     continue
-                try:
-                    value = float(metric_value)
-                except (TypeError, ValueError):
+                value = _to_finite_float(metric_value)
+                if value is None:
                     continue
                 existing = metric_candidates.get(clean_metric)
                 if existing is None or filter_name == "none":
@@ -669,8 +868,20 @@ class LMEvalAdapter(FrameworkAdapter):
                 if overall_score is None:
                     overall_score = value
 
+            # Capture run metadata for generate_additional_info() — needs overall_score
+            self._run_info = _build_additional_info(
+                lmeval_results=results,
+                benchmark_id=lmeval_task,
+                benchmark_params=benchmark_params,
+                model_args=model_args,
+                num_fewshot=num_fewshot,
+                random_seed=random_seed,
+                hf_offline=hf_offline,
+                overall_score=overall_score,
+            )
+
             # Get number of examples evaluated
-            samples = results.get("samples", {}).get(benchmark_id, [])
+            samples = results.get("samples", {}).get(lmeval_task, [])
             num_examples_evaluated = (
                 len(samples) if isinstance(samples, list) else num_examples
             )
@@ -681,6 +892,12 @@ class LMEvalAdapter(FrameworkAdapter):
             lmeval_config = results.get("config", {})
             serializable_config = _jsonable(lmeval_config)
 
+            # All lm-eval metrics are numeric floats (cast above); declare accordingly.
+            metrics_schema = [
+                MetricSchema(name=r.metric_name, type=ResultType.NUMERIC)
+                for r in evaluation_results
+            ]
+
             # Create job results
             job_results = JobResults(
                 id=job_id,
@@ -688,6 +905,7 @@ class LMEvalAdapter(FrameworkAdapter):
                 benchmark_index=config.benchmark_index,
                 model_name=model_name,
                 results=evaluation_results,
+                metrics_schema=metrics_schema,
                 overall_score=overall_score,
                 num_examples_evaluated=int(num_examples_evaluated)
                 if num_examples_evaluated is not None
@@ -707,8 +925,6 @@ class LMEvalAdapter(FrameworkAdapter):
                 JobStatusUpdate(
                     status=JobStatus.RUNNING,
                     phase=JobPhase.PERSISTING_ARTIFACTS,
-                    progress=0.9,
-                    message=_status_message("Persisting evaluation artifacts"),
                 )
             )
 
@@ -759,10 +975,7 @@ class LMEvalAdapter(FrameworkAdapter):
             callbacks.report_status(
                 JobStatusUpdate(
                     status=JobStatus.FAILED,
-                    phase=JobPhase.COMPLETED,
-                    progress=0.0,
-                    message=_status_message("Evaluation failed", code=error_code),
-                    error=ErrorInfo(
+                    error_message=MessageInfo(
                         message=error_message,
                         message_code=error_code,
                     ),
