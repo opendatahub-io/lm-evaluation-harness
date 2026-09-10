@@ -71,7 +71,7 @@ class Run(SubCommand):
             action=SplitArgs,
             help=textwrap.dedent("""
                 Space (or comma-separated) list of task names or groupings.
-                Use 'lm-eval list tasks' to see all available tasks.
+                Use 'lm-eval ls tasks' to see all available tasks.
             """).strip(),
         )
         model_group.add_argument(
@@ -241,6 +241,17 @@ class Run(SubCommand):
             metavar="<path>",
             help="Additional directory for external tasks",
         )
+        task_group.add_argument(
+            "--plugins",
+            default=None,
+            nargs="+",
+            action=SplitArgs,
+            metavar="<module>",
+            help="Comma-separated plugin modules to import before evaluation so their "
+            "@register_* decorators run (models, filters, metrics, aggregations). Use "
+            "for local or unpublished components; pip-installed packages that declare "
+            "an 'lm_eval.*' entry point are discovered automatically.",
+        )
 
         # Logging and Tracking
         logging_group = self._parser.add_argument_group("logging and tracking")
@@ -282,6 +293,14 @@ class Run(SubCommand):
             help="Weights & Biases config arguments key=val key2=val2",
         )
         logging_group.add_argument(
+            "--trackio_args",
+            default=None,
+            nargs="+",
+            action=MergeDictAction,
+            metavar="<args>",
+            help="Trackio init arguments key=val key2=val2 (e.g. project=my-evals)",
+        )
+        logging_group.add_argument(
             "--hf_hub_log_args",
             default=None,
             nargs="+",
@@ -304,11 +323,12 @@ class Run(SubCommand):
             "--seed",
             type=partial(_int_or_none_list_arg_type, 3, 4, default_seed_string),
             default=None,
-            metavar="<seed>",
+            metavar="<python,numpy,torch,fewshot>",
             help=textwrap.dedent(f"""
-                Random seeds for python,numpy,torch,fewshot (default: {default_seed_string}).
-                Use single integer for all, or comma-separated list of 4 values.
-                Use 'None' to skip setting a seed. Example: --seed 42 or --seed 0,None,8,52
+                Random seeds, one per slot (default: {default_seed_string}).
+                Pass a single integer to use it for all four (e.g. --seed 42), or a
+                comma-separated list of 4 values, using 'None' to leave that seed
+                unset (e.g. --seed 0,None,8,52).
             """).strip(),
         )
         advanced_group.add_argument(
@@ -325,12 +345,15 @@ class Run(SubCommand):
         )
         advanced_group.add_argument(
             "--metadata",
-            type=json.loads,
             default=None,
-            metavar="<arg>",
+            nargs="+",
+            action=MergeDictAction,
+            metavar="<args>",
             help=textwrap.dedent(
-                """`key=val` `key2=val` args parsable by ast.literal_eval (merged with model_args),
-                required for some tasks such as RULER"""
+                """`key=val` `key2=val` args parsable by ast.literal_eval
+                (e.g. tokenizer=gpt2 max_seq_lengths=[4096,8192]), or a JSON object
+                (e.g. '{"tokenizer": "gpt2", "max_seq_lengths": [4096, 8192]}').
+                Merged with model_args; required for some tasks such as RULER"""
             ),
         )
 
@@ -346,13 +369,25 @@ class Run(SubCommand):
         # Create and validate config (most validation now occurs in EvaluationConfig)
         cfg = EvaluatorConfig.from_cli(args)
 
+        # Import explicit plugin modules (--plugins) so their @register_* decorators
+        # run before task discovery or any model/filter/metric name is resolved.
+        # Registration is process-global, so this belongs here rather than inside
+        # simple_evaluate. Installed entry-point plugins need no wiring: they are
+        # discovered lazily by the registry getters.
+        if cfg.plugins:
+            from lm_eval.api.registry import import_plugins
+
+            import_plugins(cfg.plugins)
+
         from lm_eval import simple_evaluate
-        from lm_eval.loggers import EvaluationTracker, WandbLogger
+        from lm_eval.loggers import EvaluationTracker, TrackioLogger, WandbLogger
         from lm_eval.utils import handle_non_serializable, make_table
 
         # Set up logging
         if cfg.wandb_args:
             wandb_logger = WandbLogger(cfg.wandb_args, cfg.wandb_config_args)
+        if cfg.trackio_args:
+            trackio_logger = TrackioLogger(cfg.trackio_args)
 
         # Set up evaluation tracker
         if cfg.output_path:
@@ -374,8 +409,8 @@ class Run(SubCommand):
 
         # Log task selection (tasks already processed in config)
         if cfg.include_path is not None:
-            eval_logger.info(f"Including path: {cfg.include_path}")
-        eval_logger.info(f"Selected Tasks: {cfg.tasks}")
+            eval_logger.info("Including path: %s", cfg.include_path)
+        eval_logger.info("Selected Tasks: %s", cfg.tasks)
 
         # Run evaluation
         results = simple_evaluate(
@@ -435,8 +470,18 @@ class Run(SubCommand):
                     wandb_logger.log_eval_result()
                     if cfg.log_samples:
                         wandb_logger.log_eval_samples(samples)
-                except Exception as e:
-                    eval_logger.info(f"Logging to W&B failed: {e}")
+                except Exception as e:  # noqa: BLE001
+                    eval_logger.info("Logging to W&B failed: %s", e)
+
+            # Trackio logging
+            if cfg.trackio_args:
+                try:
+                    trackio_logger.post_init(results)
+                    trackio_logger.log_eval_result()
+                    if cfg.log_samples:
+                        trackio_logger.log_eval_samples(samples)
+                except Exception as e:  # noqa: BLE001
+                    eval_logger.info("Logging to Trackio failed: %s", e)
 
             # Save results
             evaluation_tracker.save_results_aggregated(
@@ -444,7 +489,7 @@ class Run(SubCommand):
             )
 
             if cfg.log_samples:
-                for task_name, _ in results["configs"].items():
+                for task_name in results["configs"]:
                     evaluation_tracker.save_results_samples(
                         task_name=task_name, samples=samples[task_name]
                     )
@@ -468,3 +513,6 @@ class Run(SubCommand):
 
             if cfg.wandb_args:
                 wandb_logger.run.finish()
+
+            if cfg.trackio_args:
+                trackio_logger.finish()
