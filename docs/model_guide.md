@@ -45,6 +45,7 @@ class MyCustomLM(LM):
         #...
     #...
 ```
+
 Where `Instance` is a dataclass defined in [`lm_eval.api.instance`](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/lm_eval/api/instance.py) with property `args` of request-dependent type signature described below.
 
 We support three types of requests, consisting of different interactions / measurements with an autoregressive LM.
@@ -65,15 +66,13 @@ All three request types take as input `requests` of type `list[Instance]` that h
   - This is used to evaluate *perplexity* on a data distribution.
   - It should return `(ll,) : Tuple[float]` , a.k.a. solely the *loglikelihood* of producing each piece of text given no starting input.
 
-
 To allow a model to be evaluated on all types of tasks, you will need to implement these three types of measurements (note that `loglikelihood_rolling` is a special case of `loglikelihood`). For a reference implementation, check out `lm_eval/models/huggingface.py` ! Additionally, check out `lm_eval.api.model.TemplateLM` for a class that abstracts away some commonly used functions across LM subclasses, or see if your model would lend itself well to subclassing the `lm_eval.models.huggingface.HFLM` class and overriding just the initialization or a couple methods!
 
 **Tip: be careful of indexing in loglikelihood!**
 
-
 LMs take in tokens in position `[0 1 2 ... N]` and output a probability distribution for token position `N+1`. We provide a simplified graphic here, excerpted from `huggingface.py`:
 
-```
+```text
 # how this all works (illustrated on a causal decoder-only setup):
 #          CTX      CONT
 # inp    0 1 2 3|4 5 6 7 8 9   <- last token is deleted by inp[:, :-1]
@@ -102,6 +101,27 @@ class MyCustomLM(LM):
 Using this decorator results in the class being added to an accounting of the usable LM types maintained internally to the library at `lm_eval.api.registry.MODEL_REGISTRY`. See `lm_eval.api.registry` for more detail on what sorts of registries and decorators exist in the library!
 
 **Tip: be sure to import your model in `lm_eval/models/__init__.py!`**
+
+### Registering a backend from an external package (plugins)
+
+If your backend lives in your **own** package rather than in the `lm-eval` source
+tree, you do not need to fork or edit `lm-eval`. Declare an `lm_eval.models` entry
+point and `lm-eval --model <name>` resolves it at runtime:
+
+# in your_project/pyproject.toml
+
+```toml
+[project.entry-points."lm_eval.models"]
+my-backend = "my_pkg.models:MyBackendLM"
+```
+
+```bash
+lm-eval run --model my-backend --tasks hellaswag
+```
+
+For unpublished modules, `--plugins my_pkg.models` imports them so their
+`@register_model` decorator runs. Filters, metrics and aggregations work the same
+way — see the [Plugin Guide](./plugins.md) for the full picture.
 
 ## Testing
 
@@ -162,7 +182,8 @@ class MyCustomLM(LM):
 - `apply_chat_template`
   - This method performs the bulk of the work required for chat-formatting.
   - As input, a `chat_history: List[Dict[str, str]]` is passed in. This is a transcript of a conversation of a form similar to
-      ```
+
+  ```text
       [
         {"system": <user-provided system message such as "You are a helpful math-focused chatbot">},
         {"user": <task example - a few-shot example 'input'>}
@@ -170,8 +191,9 @@ class MyCustomLM(LM):
         # ... more few-shot examples, potentially
         {"user": <test set query--response on which we will evaluate>},
       ]
-      ```
-      which can then be converted into a string input.
+  ```
+
+  which can then be converted into a string input.
   - The output is a string representing this conversation that can be fed into the model.
   - For example, this consists of simply calling `tokenizer.apply_chat_template` for HFLM--see the implementation there for reference.
 - `tokenizer_name`
@@ -185,6 +207,8 @@ If not implemented for a given model type, the flags `--apply_chat_template` , `
 ## Other
 
 **Pro tip**: In order to make the Evaluation Harness overestimate total runtimes rather than underestimate it, HuggingFace models come in-built with the ability to provide responses on data points in *descending order by total input length* via `lm_eval.utils.Reorderer`. Take a look at `lm_eval.models.hf_causal.HFLM` to see how this is done, and see if you can implement it in your own model!
+
+**Subclassing an existing backend**: If your backend shares most of its logic with an existing one and differs only in a narrow concern (e.g. how the underlying model is created or which device it targets), prefer subclassing over duplication. For example, `lm_eval.models.optimum_lm.OptimumLM` subclasses `HFLM` and overrides only `_create_model`.
 
 ## Conclusion
 

@@ -1,0 +1,20 @@
+pull_request_rules:
+
+  - name: Backport merged PRs from incubation → stable (skip .tekton-only changes)
+    conditions:
+      - base=incubation
+      - merged
+      - repository-full-name=opendatahub-io/lm-evaluation-harness
+      - files~=^(?!\.tekton/).+
+    actions:
+      backport:
+        branches:
+          - stable
+        ignore_conflicts: true
+        labels:
+          - bot/sync-stable
+        title: "[stable] {{ title | replace('[incubation] ', '') | replace('Backport to incubation: ', '') | replace('Backport to incubation:', '') }}"
+        body: |
+          Backport of #{{ number }} — {{ title }}
+
+          This PR cherry-picks the changes from `incubation` into `stable`.
