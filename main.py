@@ -8,7 +8,8 @@ Required environment variables:
 - REGISTRY_URL: OCI registry URL
 
 Optional environment variables:
-- EVALHUB_JOB_SPEC_PATH: path to the job spec JSON (defaults to ``/meta/job.json``); must resolve under ``/meta``
+- EVALHUB_MODE: ``k8s`` or ``local`` (default for job spec containment: k8s)
+- EVALHUB_JOB_SPEC_PATH: path to the job spec JSON (defaults to ``/meta/job.json``); must resolve under ``/meta`` in k8s mode
 - REGISTRY_USERNAME: Registry username (optional)
 - REGISTRY_PASSWORD: Registry password/token (optional)
 
@@ -25,6 +26,7 @@ files and do not call the Hub. You do not need ``parameters.offline``.
 import json
 import logging
 import math
+import mimetypes
 import os
 import re
 import requests
@@ -37,6 +39,7 @@ from typing import Any, Iterator
 
 
 _TEST_DATA_DIR = "/test_data"
+_JOB_SPEC_ALLOWED_ROOT = Path("/meta")
 
 
 def _get_lmeval_version() -> str:
@@ -46,9 +49,6 @@ def _get_lmeval_version() -> str:
     except PackageNotFoundError:
         return "unknown"
 
-
-# EvalHub mounts the job spec JSON under this directory only; reject other paths (CWE-22).
-_JOB_SPEC_ALLOWED_ROOT = Path("/meta")
 
 # Benchmarks whose HuggingFace datasets use custom loading scripts and require trust_remote_code.
 # Remove an entry here once the dataset is converted to parquet on the Hub.
@@ -92,7 +92,7 @@ def _code_eval_environment(benchmark_id: str) -> Iterator[None]:
 
 
 def _resolve_job_spec_path_for_read(path: str) -> Path | None:
-    """Return a resolved path to open, or None if ``path`` is invalid or escapes ``/meta``."""
+    """Resolve the configured job spec path for either Kubernetes or local runtime."""
     if not isinstance(path, str) or not path.strip():
         print("WARNING: job spec path is empty; refusing to open", file=sys.stderr)
         return None
@@ -101,24 +101,28 @@ def _resolve_job_spec_path_for_read(path: str) -> Path | None:
     except (OSError, ValueError) as exc:
         print(f"WARNING: invalid job spec path {path!r}: {exc}", file=sys.stderr)
         return None
-    try:
-        allowed = _JOB_SPEC_ALLOWED_ROOT.resolve()
-    except OSError:
-        allowed = _JOB_SPEC_ALLOWED_ROOT
-    if not resolved.is_relative_to(allowed):
-        print(
-            f"WARNING: job spec path {path!r} resolves to {resolved} "
-            f"which is not under {allowed}; refusing to open",
-            file=sys.stderr,
-        )
-        return None
+    # Default to k8s and enforce containment only in k8s mode.
+    if os.environ.get("EVALHUB_MODE", "k8s").strip().lower() == "k8s":
+        try:
+            allowed = _JOB_SPEC_ALLOWED_ROOT.resolve()
+        except OSError:
+            allowed = _JOB_SPEC_ALLOWED_ROOT
+        if not resolved.is_relative_to(allowed):
+            print(
+                f"WARNING: job spec path {path!r} resolves to {resolved} "
+                f"which is not under {allowed}; refusing to open",
+                file=sys.stderr,
+            )
+            return None
     return resolved
 
 
 def _read_job_spec_parameters_from_path(path: str) -> dict[str, Any]:
     """Load top-level ``parameters`` object from the job spec JSON file.
 
-    Only files whose resolved path stays under ``/meta`` are opened (see ``EVALHUB_JOB_SPEC_PATH``).
+    In k8s mode (the default), only files whose resolved path stays under ``/meta``
+    are opened (see ``EVALHUB_JOB_SPEC_PATH``). Local mode supports configured
+    paths in local runtime job directories.
     """
     resolved = _resolve_job_spec_path_for_read(path)
     if resolved is None:
@@ -271,6 +275,7 @@ from evalhub.adapter import (
 )
 from evalhub.models import MetricSchema, ResultType
 from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
+from evalhub.adapter.mlflow import MlflowArtifact
 
 
 _seed_hf_offline_before_lm_eval_import()
@@ -966,7 +971,10 @@ class LMEvalAdapter(FrameworkAdapter):
             )
 
             # Save results to file
-            output_dir = Path(__file__).parent / "output"
+            if self.local_jobs_base_path is not None:
+                output_dir = self.local_jobs_base_path / "output"
+            else:
+                output_dir = Path(__file__).parent / "output"
             output_dir.mkdir(parents=True, exist_ok=True)
 
             results_file = output_dir / f"results_{job_id}.json"
@@ -977,6 +985,18 @@ class LMEvalAdapter(FrameworkAdapter):
                     indent=2,
                     default=str,
                 )
+
+            # Capture the same output files sent to OCI for the MLflow export.
+            self.mlflow_artifacts = [
+                MlflowArtifact(
+                    path=file.relative_to(output_dir).as_posix(),
+                    content=file.read_bytes(),
+                    content_type=mimetypes.guess_type(file.name)[0]
+                    or "application/octet-stream",
+                )
+                for file in sorted(output_dir.rglob("*"))
+                if file.is_file()
+            ]
 
             # Create OCI artifact (only when exports are configured)
             oci_exports = config.exports.oci if config.exports else None
@@ -1029,7 +1049,7 @@ def main() -> int:
 
     The adapter automatically loads:
     - Settings from environment variables (REGISTRY_URL, etc.)
-    - JobSpec from /meta/job.json (mounted via ConfigMap in Kubernetes)
+    - JobSpec from EVALHUB_JOB_SPEC_PATH, defaulting to /meta/job.json in Kubernetes
 
     Returns:
         int: Exit code (0 for success, 1 for failure)
@@ -1077,7 +1097,9 @@ def main() -> int:
         logger.info("=" * 80)
 
         # MLflow first; run id from save() is sent on report_results when SDK returns it.
-        mlflow_run_id = callbacks.mlflow.save(results, adapter.job_spec)
+        mlflow_run_id = callbacks.mlflow.save(
+            results, adapter.job_spec, artifacts=adapter.mlflow_artifacts
+        )
         if mlflow_run_id:
             results.mlflow_run_id = mlflow_run_id
 
