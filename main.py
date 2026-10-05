@@ -30,6 +30,7 @@ import mimetypes
 import os
 import re
 import requests
+import stat
 import sys
 import time
 from contextlib import contextmanager
@@ -41,6 +42,15 @@ from urllib.parse import urlparse
 
 _TEST_DATA_DIR = "/test_data"
 _JOB_SPEC_ALLOWED_ROOT = Path("/meta")
+
+
+def _read_output_file(file: Path) -> bytes:
+    """Read a regular output file without following a file symlink."""
+    fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ValueError(f"Output file is not regular: {file}")
+        return stream.read()
 
 
 def _get_lmeval_version() -> str:
@@ -1069,12 +1079,12 @@ class LMEvalAdapter(FrameworkAdapter):
             self.mlflow_artifacts = [
                 MlflowArtifact(
                     path=file.relative_to(output_dir).as_posix(),
-                    content=file.read_bytes(),
+                    content=_read_output_file(file),
                     content_type=mimetypes.guess_type(file.name)[0]
                     or "application/octet-stream",
                 )
                 for file in sorted(output_dir.rglob("*"))
-                if file.is_file()
+                if not file.is_symlink() and file.is_file()
             ]
 
             # Create OCI artifact (only when exports are configured)

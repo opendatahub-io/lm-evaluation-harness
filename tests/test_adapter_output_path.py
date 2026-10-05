@@ -1,6 +1,7 @@
 """Result files are saved in the appropriate directory for each runtime."""
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -72,6 +73,7 @@ def test_benchmark_saves_results_in_runtime_output_directory(
     nested_dir = expected_dir / "details"
     nested_dir.mkdir(parents=True)
     (nested_dir / "samples.jsonl").write_bytes(b'{"doc_id": 0}\n')
+    (expected_dir / "linked.jsonl").symlink_to(nested_dir / "samples.jsonl")
 
     results = adapter.run_benchmark_job(adapter.job_spec, callbacks)
 
@@ -110,3 +112,25 @@ def test_main_passes_output_artifacts_to_mlflow(monkeypatch: pytest.MonkeyPatch)
     )
     assert results.mlflow_run_id == "run-1"
     callbacks.report_results.assert_called_once_with(results)
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "fifo"])
+def test_output_read_rejects_path_replacement(tmp_path: Path, replacement: str) -> None:
+    output_dir = tmp_path / "output"
+    nested = output_dir / "nested"
+    nested.mkdir(parents=True)
+    file = nested / "sample.json"
+    file.write_bytes(b"original")
+    # Simulate replacement after the caller's file checks.
+    assert file.is_file() and not file.is_symlink()
+    file.unlink()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / file.name).write_bytes(b"secret")
+    if replacement == "symlink":
+        file.symlink_to(external / file.name)
+    else:
+        os.mkfifo(file)
+
+    with pytest.raises((OSError, ValueError)):
+        main._read_output_file(file)
