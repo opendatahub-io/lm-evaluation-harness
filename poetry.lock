@@ -4630,27 +4630,6 @@ requests = ">=2.26.0"
 blobfile = ["blobfile (>=2)"]
 
 [[package]]
-name = "tinyBenchmarks"
-version = "1.0.0"
-description = "tinyBenchmarks: evaluating LLMs with fewer examples"
-optional = false
-python-versions = "*"
-groups = ["main"]
-files = []
-develop = false
-
-[package.dependencies]
-numpy = "*"
-requests = "*"
-scipy = "*"
-
-[package.source]
-type = "git"
-url = "https://github.com/felipemaiapolo/tinyBenchmarks.git"
-reference = "e9a8b1031b0340571beb6c9ca3a27891be09a8fd"
-resolved_reference = "e9a8b1031b0340571beb6c9ca3a27891be09a8fd"
-
-[[package]]
 name = "tokenizers"
 version = "0.22.2"
 description = ""
@@ -5465,4 +5444,4 @@ testing = ["pytest", "pytest-cov", "pytest-xdist"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.13"
-content-hash = "6910019da41a379f118c0a91577cea0cc0128535735757fdc94c7015f6f28340"
+content-hash = "452790e488148828add06d3b033385d97515ea408ab743c2c459e98cab382b6d"
