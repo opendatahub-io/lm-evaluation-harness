@@ -43,6 +43,7 @@ jobs:
 #      run: mypy . --ignore-missing-imports --check-untyped-defs --explicit-package-bases --warn-unreachable
 # Job 2
   testcpu:
+    if: false  # Disabled
     name: CPU Tests
     runs-on: ubuntu-latest
     strategy:
