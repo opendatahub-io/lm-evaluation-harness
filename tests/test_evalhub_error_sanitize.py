@@ -76,7 +76,9 @@ from main import _evaluation_failure_for_evalhub, _sanitize_error_message
         ),
     ],
 )
-def test_sanitize_removes_secrets(raw: str, forbidden: list[str], must_contain: str) -> None:
+def test_sanitize_removes_secrets(
+    raw: str, forbidden: list[str], must_contain: str
+) -> None:
     out = _sanitize_error_message(raw)
     for s in forbidden:
         assert s not in out, out
@@ -84,7 +86,9 @@ def test_sanitize_removes_secrets(raw: str, forbidden: list[str], must_contain: 
 
 
 def test_sanitize_preserves_plain_urls() -> None:
-    msg = "401 Client Error: Unauthorized for url: https://api.example.com/v1/completions"
+    msg = (
+        "401 Client Error: Unauthorized for url: https://api.example.com/v1/completions"
+    )
     assert _sanitize_error_message(msg) == msg
 
 
@@ -132,7 +136,9 @@ def test_gated_tokenizer_error_is_not_labeled_dataset() -> None:
 
 
 def test_gated_tokenizer_error_not_tied_to_one_model_id() -> None:
-    msg, code = _evaluation_failure_for_evalhub(OSError(_TOKENIZER_GATE_MSG_OTHER_MODEL))
+    msg, code = _evaluation_failure_for_evalhub(
+        OSError(_TOKENIZER_GATE_MSG_OTHER_MODEL)
+    )
     assert code == "gated_tokenizer_auth_required"
     assert "tokenizer" in msg.lower()
 
@@ -153,7 +159,9 @@ def test_gated_tokenizer_detected_from_exception_cause() -> None:
 
 
 def test_unspecified_gated_repo_does_not_claim_dataset() -> None:
-    msg, code = _evaluation_failure_for_evalhub(OSError("You are trying to access a gated repo."))
+    msg, code = _evaluation_failure_for_evalhub(
+        OSError("You are trying to access a gated repo.")
+    )
     assert "dataset" not in msg.lower()
     assert "tokenizer" not in msg.lower()
     assert "resource" in msg.lower()
@@ -180,5 +188,3 @@ def test_inference_endpoint_403_is_model_access_forbidden() -> None:
     msg, code = _evaluation_failure_for_evalhub(err)
     assert code == "model_access_forbidden"
     assert msg.startswith("Model endpoint returned HTTP 403")
-
-

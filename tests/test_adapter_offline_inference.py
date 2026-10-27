@@ -28,10 +28,14 @@ def fake_test_data(tmp_path: Path) -> Path:
 def test_infer_true_when_tokenizer_and_slug_bundle(fake_test_data: Path) -> None:
     tok_path = fake_test_data / "tokenizer"
     params = {"tokenizer": str(tok_path.resolve())}
-    assert _infer_auto_offline_from_local_test_data(params, test_data_root=fake_test_data)
+    assert _infer_auto_offline_from_local_test_data(
+        params, test_data_root=fake_test_data
+    )
 
 
-def test_nested_parameters_tokenizer_does_not_trigger_offline(fake_test_data: Path) -> None:
+def test_nested_parameters_tokenizer_does_not_trigger_offline(
+    fake_test_data: Path,
+) -> None:
     """Nested ``parameters.parameters.tokenizer`` is not used by ``build_lmeval_config``; infer must match."""
     tok_path = fake_test_data / "tokenizer"
     params = {
@@ -87,6 +91,4 @@ def test_infer_false_when_path_outside_root(tmp_path: Path) -> None:
     outside.mkdir(parents=True)
     _touch(outside / "config.json")
     params = {"tokenizer": str(outside.resolve())}
-    assert not _infer_auto_offline_from_local_test_data(
-        params, test_data_root=root
-    )
+    assert not _infer_auto_offline_from_local_test_data(params, test_data_root=root)

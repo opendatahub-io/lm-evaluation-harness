@@ -8,7 +8,7 @@ Required environment variables:
 - REGISTRY_URL: OCI registry URL
 
 Optional environment variables:
-- EVALHUB_MODE: ``k8s`` or ``local`` (default for job spec containment: k8s)
+- EVALHUB_MODE: ``k8s`` or ``local`` (default: k8s)
 - EVALHUB_JOB_SPEC_PATH: path to the job spec JSON (defaults to ``/meta/job.json``); must resolve under ``/meta`` in k8s mode
 - REGISTRY_USERNAME: Registry username (optional)
 - REGISTRY_PASSWORD: Registry password/token (optional)
@@ -29,7 +29,6 @@ import math
 import mimetypes
 import os
 import re
-import requests
 import stat
 import sys
 import time
@@ -39,9 +38,19 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlparse
 
+import requests
+from evalhub.adapter.settings import AdapterSettings
+
 
 _TEST_DATA_DIR = "/test_data"
 _JOB_SPEC_ALLOWED_ROOT = Path("/meta")
+
+
+def _load_adapter_settings() -> AdapterSettings:
+    """Resolve one runtime configuration for early job reads and the SDK."""
+    # SDK 1.0.6 defaults to local; this entry point requires explicit local mode.
+    os.environ.setdefault("EVALHUB_MODE", "k8s")
+    return AdapterSettings.from_env()
 
 
 def _read_output_file(file: Path) -> bytes:
@@ -55,6 +64,7 @@ def _read_output_file(file: Path) -> bytes:
 
 def _get_lmeval_version() -> str:
     from importlib.metadata import PackageNotFoundError, version
+
     try:
         return version("lm_eval")
     except PackageNotFoundError:
@@ -63,9 +73,11 @@ def _get_lmeval_version() -> str:
 
 # Benchmarks whose HuggingFace datasets use custom loading scripts and require trust_remote_code.
 # Remove an entry here once the dataset is converted to parquet on the Hub.
-_BENCHMARKS_REQUIRING_REMOTE_CODE: frozenset[str] = frozenset({
-    "ethics_cm",
-})
+_BENCHMARKS_REQUIRING_REMOTE_CODE: frozenset[str] = frozenset(
+    {
+        "ethics_cm",
+    }
+)
 
 
 def _needs_trust_remote_code(benchmark_id: str) -> bool:
@@ -76,11 +88,13 @@ def _needs_trust_remote_code(benchmark_id: str) -> bool:
 # Hugging Face code_eval metric. Keep this allow list narrow: image-level or
 # user-provided HF_ALLOW_CODE_EVAL values must not enable execution for other
 # EvalHub benchmarks.
-_BENCHMARKS_REQUIRING_CODE_EXECUTION: frozenset[str] = frozenset({
-    "humaneval",
-    "humaneval_instruct",
-    "mbpp",
-})
+_BENCHMARKS_REQUIRING_CODE_EXECUTION: frozenset[str] = frozenset(
+    {
+        "humaneval",
+        "humaneval_instruct",
+        "mbpp",
+    }
+)
 
 
 def _needs_code_execution(benchmark_id: str) -> bool:
@@ -102,18 +116,16 @@ def _code_eval_environment(benchmark_id: str) -> Iterator[None]:
             os.environ[env_name] = previous
 
 
-def _resolve_job_spec_path_for_read(path: str) -> Path | None:
+def _resolve_job_spec_path_for_read(settings: AdapterSettings) -> Path | None:
     """Resolve the configured job spec path for either Kubernetes or local runtime."""
-    if not isinstance(path, str) or not path.strip():
-        print("WARNING: job spec path is empty; refusing to open", file=sys.stderr)
-        return None
+    path = settings.resolved_job_spec_path
     try:
-        resolved = Path(path.strip()).resolve()
+        resolved = path.resolve()
     except (OSError, ValueError) as exc:
         print(f"WARNING: invalid job spec path {path!r}: {exc}", file=sys.stderr)
         return None
-    # Default to k8s and enforce containment only in k8s mode.
-    if os.environ.get("EVALHUB_MODE", "k8s").strip().lower() == "k8s":
+    # Settings default to k8s; enforce containment only in that mode.
+    if settings.mode == "k8s":
         try:
             allowed = _JOB_SPEC_ALLOWED_ROOT.resolve()
         except OSError:
@@ -128,14 +140,14 @@ def _resolve_job_spec_path_for_read(path: str) -> Path | None:
     return resolved
 
 
-def _read_job_spec_parameters_from_path(path: str) -> dict[str, Any]:
+def _read_job_spec_parameters(settings: AdapterSettings) -> dict[str, Any]:
     """Load top-level ``parameters`` object from the job spec JSON file.
 
     In k8s mode (the default), only files whose resolved path stays under ``/meta``
     are opened (see ``EVALHUB_JOB_SPEC_PATH``). Local mode supports configured
     paths in local runtime job directories.
     """
-    resolved = _resolve_job_spec_path_for_read(path)
+    resolved = _resolve_job_spec_path_for_read(settings)
     if resolved is None:
         return {}
     try:
@@ -150,7 +162,9 @@ def _read_job_spec_parameters_from_path(path: str) -> dict[str, Any]:
         )
         return {}
     except OSError as exc:
-        print(f"WARNING: I/O error reading job spec {resolved!r}: {exc}", file=sys.stderr)
+        print(
+            f"WARNING: I/O error reading job spec {resolved!r}: {exc}", file=sys.stderr
+        )
         return {}
     except json.JSONDecodeError as exc:
         print(f"WARNING: invalid JSON in job spec {resolved!r}: {exc}", file=sys.stderr)
@@ -264,9 +278,10 @@ def configure_hf_offline_environment(hf_home: str) -> None:
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 
-def _seed_hf_offline_before_lm_eval_import() -> None:
-    path = os.environ.get("EVALHUB_JOB_SPEC_PATH", "/meta/job.json")
-    if not _infer_auto_offline_from_local_test_data(_read_job_spec_parameters_from_path(path)):
+def _seed_hf_offline_before_lm_eval_import(settings: AdapterSettings) -> None:
+    if not _infer_auto_offline_from_local_test_data(
+        _read_job_spec_parameters(settings)
+    ):
         return
     configure_hf_offline_environment(_TEST_DATA_DIR)
 
@@ -284,17 +299,19 @@ from evalhub.adapter import (
     MessageInfo,
     OCIArtifactSpec,
 )
-from evalhub.models import MetricSchema, ResultType
 from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
 from evalhub.adapter.mlflow import MlflowArtifact
+from evalhub.models import MetricSchema, ResultType
 
 
-_seed_hf_offline_before_lm_eval_import()
+_ADAPTER_SETTINGS = _load_adapter_settings()
+_seed_hf_offline_before_lm_eval_import(_ADAPTER_SETTINGS)
 
 # NOTE: keep these imports after _seed_hf_offline_before_lm_eval_import() so HF offline env vars
 # are set before lm_eval (and Hugging Face libraries) are imported.
 from lm_eval import simple_evaluate  # noqa: E402
 from lm_eval.tasks import TaskManager  # noqa: E402
+
 
 # Eval-hub catalog IDs that differ from lm-eval task names. Tags (e.g. winogender) expand
 # to multiple subtasks without a group_subtasks entry, so results are not keyed by the
@@ -471,7 +488,9 @@ def _chained_exception_text(exc: BaseException) -> str:
 def _is_huggingface_hub_host(hostname: str) -> bool:
     """True for huggingface.co / hf.co (and subdomains), not Inference Endpoints."""
     host = (hostname or "").lower()
-    return host in {"huggingface.co", "hf.co"} or host.endswith((".huggingface.co", ".hf.co"))
+    return host in {"huggingface.co", "hf.co"} or host.endswith(
+        (".huggingface.co", ".hf.co")
+    )
 
 
 def _is_gated_huggingface_error(exc: BaseException, error_lower: str) -> bool:
@@ -534,8 +553,7 @@ def _evaluation_failure_for_evalhub(exc: BaseException) -> tuple[str, str]:
         if kind == "tokenizer":
             return (
                 "Gated HuggingFace tokenizer error; authentication required. "
-                "Specify an accessible tokenizer, or "
-                + _HF_TOKEN_SECRET_HINT,
+                "Specify an accessible tokenizer, or " + _HF_TOKEN_SECRET_HINT,
                 "gated_tokenizer_auth_required",
             )
         if kind == "dataset":
@@ -649,7 +667,9 @@ def _build_additional_info(
         "dataset": _build_dataset_info(lmeval_results, benchmark_id),
         "task_version": lmeval_results.get("versions", {}).get(benchmark_id),
         # runtime / reproducibility
-        "lmeval_version": str(lmeval_results.get("lm_eval_version") or _get_lmeval_version()),
+        "lmeval_version": str(
+            lmeval_results.get("lm_eval_version") or _get_lmeval_version()
+        ),
         "lmeval_git_hash": lmeval_results.get("git_hash"),
         "evaluation_date": (
             datetime.fromtimestamp(lmeval_results["date"], tz=UTC).isoformat()
@@ -671,7 +691,9 @@ def _build_additional_info(
     return {k: v for k, v in raw.items() if v is not None}
 
 
-def _build_dataset_info(lmeval_results: dict, benchmark_id: str) -> list[dict[str, str]] | None:
+def _build_dataset_info(
+    lmeval_results: dict, benchmark_id: str
+) -> list[dict[str, str]] | None:
     """Build a list of dataset provenance records for the benchmark.
 
     For group tasks (multiple subtasks), collects dataset info from each subtask.
@@ -711,13 +733,18 @@ def _build_dataset_info(lmeval_results: dict, benchmark_id: str) -> list[dict[st
                 config_name=dataset_name,
                 download_config=DownloadConfig(local_files_only=True),
             )
-            for url in (info.download_checksums or {}):
+            for url in info.download_checksums or {}:
                 m = sha_re.search(url)
                 if m:
                     sha = m.group(1)
                     break
         except Exception:
-            logger.debug("_build_dataset_info: could not get SHA for %s/%s", dataset_path, dataset_name, exc_info=True)
+            logger.debug(
+                "_build_dataset_info: could not get SHA for %s/%s",
+                dataset_path,
+                dataset_name,
+                exc_info=True,
+            )
 
         record: dict[str, str] = {"hf_repo": dataset_path}
         if dataset_name:
@@ -858,20 +885,18 @@ class LMEvalAdapter(FrameworkAdapter):
     allowing benchmarks to be executed as EvalHub jobs.
     """
 
-    def __init__(self, job_spec_path: str | None = None):
+    def __init__(self, settings: AdapterSettings):
         """Initialize the LMEval adapter.
 
         Args:
-            job_spec_path: Optional path to job specification file.
-                          If not provided, uses EVALHUB_JOB_SPEC_PATH env var or default.
+            settings: Runtime configuration resolved at startup, including the
+                      job spec path from EVALHUB_JOB_SPEC_PATH or the mode default.
         """
-        super().__init__(job_spec_path=job_spec_path)
+        super().__init__(settings=settings)
         self._run_info: dict[str, Any] = {}
         logger.info("LMEval adapter initialized")
 
-    def generate_additional_info(
-        self, results: JobResults
-    ) -> dict[str, Any] | None:
+    def generate_additional_info(self, results: JobResults) -> dict[str, Any] | None:
         """Return lm-eval-specific supplementary metadata captured during the run."""
         return self._run_info or None
 
@@ -984,6 +1009,7 @@ class LMEvalAdapter(FrameworkAdapter):
 
             # Some datasets use custom HF loading scripts and require trust_remote_code.
             import datasets as _datasets
+
             _prev_trust_remote_code = _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE
             if _needs_trust_remote_code(benchmark_id):
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
@@ -1043,7 +1069,9 @@ class LMEvalAdapter(FrameworkAdapter):
                     subtask_metrics: dict[str, float] = {}
                     subtask_count: dict[str, int] = {}
                     for subtask in group_subtasks:
-                        for metric_name, metric_value in all_results.get(subtask, {}).items():
+                        for metric_name, metric_value in all_results.get(
+                            subtask, {}
+                        ).items():
                             if "," not in metric_name:
                                 continue
                             if metric_value == "N/A" or metric_value is None:
@@ -1052,7 +1080,9 @@ class LMEvalAdapter(FrameworkAdapter):
                             if value is None:
                                 continue
                             clean, _, _ = metric_name.rpartition(",")
-                            subtask_metrics[clean] = subtask_metrics.get(clean, 0) + value
+                            subtask_metrics[clean] = (
+                                subtask_metrics.get(clean, 0) + value
+                            )
                             subtask_count[clean] = subtask_count.get(clean, 0) + 1
                     task_results = {
                         f"{k},none": subtask_metrics[k] / subtask_count[k]
@@ -1062,7 +1092,9 @@ class LMEvalAdapter(FrameworkAdapter):
             # Build evaluation results
             # Collect candidates keyed by clean metric name; prefer the "none" (unfiltered)
             # value when the same metric appears under multiple filter names.
-            metric_candidates: dict[str, tuple[float, str]] = {}  # name -> (value, filter)
+            metric_candidates: dict[
+                str, tuple[float, str]
+            ] = {}  # name -> (value, filter)
             for metric_name, metric_value in task_results.items():
                 if "," not in metric_name:
                     continue
@@ -1183,7 +1215,9 @@ class LMEvalAdapter(FrameworkAdapter):
                 coords = oci_exports.coordinates.model_copy(deep=True)
                 coords.annotations.update(
                     {
-                        "org.opencontainers.image.created": datetime.now(UTC).isoformat(),
+                        "org.opencontainers.image.created": datetime.now(
+                            UTC
+                        ).isoformat(),
                         "io.github.eval-hub.benchmark": benchmark_id,
                         "io.github.eval-hub.model": model_name,
                         "io.github.eval-hub.job_id": job_id,
@@ -1226,24 +1260,21 @@ class LMEvalAdapter(FrameworkAdapter):
 def main() -> int:
     """Main entry point.
 
-    The adapter automatically loads:
-    - Settings from environment variables (REGISTRY_URL, etc.)
+    The adapter uses settings resolved at startup to load:
+    - Configuration from environment variables (REGISTRY_URL, etc.)
     - JobSpec from EVALHUB_JOB_SPEC_PATH, defaulting to /meta/job.json in Kubernetes
 
     Returns:
         int: Exit code (0 for success, 1 for failure)
     """
-    import os
-
     try:
-        # Create adapter with job spec path from environment or default
-        job_spec_path = os.getenv("EVALHUB_JOB_SPEC_PATH", "/meta/job.json")
-        adapter = LMEvalAdapter(job_spec_path=job_spec_path)
+        # Create adapter with the settings shared by early job reads and the SDK.
+        adapter = LMEvalAdapter(settings=_ADAPTER_SETTINGS)
 
         logger.info("=" * 80)
         logger.info("LMEval EvalHub Adapter")
         logger.info("=" * 80)
-        logger.info(f"Loaded job spec from: {job_spec_path}")
+        logger.info("Loaded job spec from: %s", adapter.settings.resolved_job_spec_path)
         logger.info("Job spec configuration:")
         logger.info(f"  Job ID: {adapter.job_spec.id}")
         logger.info(f"  Benchmark: {adapter.job_spec.benchmark_id}")
