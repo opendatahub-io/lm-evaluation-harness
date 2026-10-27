@@ -39,7 +39,23 @@ from typing import Any, Iterator
 from urllib.parse import urlparse
 
 import requests
+from evalhub.adapter import (
+    DefaultCallbacks,
+    EvaluationResult,
+    FrameworkAdapter,
+    JobCallbacks,
+    JobPhase,
+    JobResults,
+    JobSpec,
+    JobStatus,
+    JobStatusUpdate,
+    MessageInfo,
+    OCIArtifactSpec,
+)
+from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
+from evalhub.adapter.mlflow import MlflowArtifact
 from evalhub.adapter.settings import AdapterSettings
+from evalhub.models import MetricSchema, ResultType
 
 
 _TEST_DATA_DIR = "/test_data"
@@ -284,24 +300,6 @@ def _seed_hf_offline_before_lm_eval_import(settings: AdapterSettings) -> None:
     ):
         return
     configure_hf_offline_environment(_TEST_DATA_DIR)
-
-
-from evalhub.adapter import (
-    DefaultCallbacks,
-    EvaluationResult,
-    FrameworkAdapter,
-    JobCallbacks,
-    JobPhase,
-    JobResults,
-    JobSpec,
-    JobStatus,
-    JobStatusUpdate,
-    MessageInfo,
-    OCIArtifactSpec,
-)
-from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
-from evalhub.adapter.mlflow import MlflowArtifact
-from evalhub.models import MetricSchema, ResultType
 
 
 _ADAPTER_SETTINGS = _load_adapter_settings()
@@ -1257,6 +1255,31 @@ class LMEvalAdapter(FrameworkAdapter):
             raise RuntimeError(error_message) from e
 
 
+def _save_mlflow_best_effort(
+    callbacks: DefaultCallbacks,
+    results: JobResults,
+    job_spec: JobSpec,
+    artifacts: list[MlflowArtifact],
+) -> str | None:
+    """Export to MLflow without failing a completed evaluation."""
+    mlflow = callbacks.mlflow
+    # Temporary compatibility shim for eval-hub-sdk 1.0.6: save() reports FAILED
+    # before raising. Detach only its status callback during the synchronous save;
+    # remove this private-attribute workaround when the SDK supports best effort.
+    original_callbacks = mlflow._callbacks
+    try:
+        mlflow._callbacks = None
+        return mlflow.save(results, job_spec, artifacts=artifacts)
+    except Exception as exc:
+        logger.warning(
+            "MLflow export failed; continuing with evaluation results: %s",
+            _sanitize_error_message(str(exc)),
+        )
+        return None
+    finally:
+        mlflow._callbacks = original_callbacks
+
+
 def main() -> int:
     """Main entry point.
 
@@ -1307,8 +1330,8 @@ def main() -> int:
         logger.info("=" * 80)
 
         # MLflow first; run id from save() is sent on report_results when SDK returns it.
-        mlflow_run_id = callbacks.mlflow.save(
-            results, adapter.job_spec, artifacts=adapter.mlflow_artifacts
+        mlflow_run_id = _save_mlflow_best_effort(
+            callbacks, results, adapter.job_spec, adapter.mlflow_artifacts
         )
         if mlflow_run_id:
             results.mlflow_run_id = mlflow_run_id
