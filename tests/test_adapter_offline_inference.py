@@ -165,12 +165,17 @@ def test_seed_does_not_enable_offline_when_job_spec_cannot_be_read(
         "HF_EVALUATE_OFFLINE",
         "TRANSFORMERS_OFFLINE",
     )
-    for name in offline_vars:
-        monkeypatch.delenv(name, raising=False)
+    original_env = {name: main.os.environ.get(name) for name in offline_vars}
+    with monkeypatch.context() as env_patch:
+        for name in offline_vars:
+            env_patch.setenv(name, "")
+            env_patch.delenv(name)
 
-    main._seed_hf_offline_before_lm_eval_import()
+        main._seed_hf_offline_before_lm_eval_import()
 
-    assert all(name not in main.os.environ for name in offline_vars)
+        assert all(name not in main.os.environ for name in offline_vars)
+
+    assert {name: main.os.environ.get(name) for name in offline_vars} == original_env
 
 
 def test_seed_offline_environment_for_staged_toxigen_assets(
@@ -193,15 +198,20 @@ def test_seed_offline_environment_for_staged_toxigen_assets(
         "HF_EVALUATE_OFFLINE",
         "TRANSFORMERS_OFFLINE",
     )
-    for name in offline_vars:
-        monkeypatch.delenv(name, raising=False)
+    original_env = {name: main.os.environ.get(name) for name in offline_vars}
+    with monkeypatch.context() as env_patch:
+        for name in offline_vars:
+            env_patch.setenv(name, "")
+            env_patch.delenv(name)
 
-    main._seed_hf_offline_before_lm_eval_import()
+        main._seed_hf_offline_before_lm_eval_import()
 
-    assert main.os.environ["HF_HOME"] == str(root)
-    assert main.os.environ["HF_HUB_CACHE"] == str(root / "hub")
-    assert main.os.environ["HF_DATASETS_CACHE"] == str(root / "datasets")
-    assert main.os.environ["HF_HUB_OFFLINE"] == "1"
-    assert main.os.environ["HF_DATASETS_OFFLINE"] == "1"
-    assert main.os.environ["HF_EVALUATE_OFFLINE"] == "1"
-    assert main.os.environ["TRANSFORMERS_OFFLINE"] == "1"
+        assert main.os.environ["HF_HOME"] == str(root)
+        assert main.os.environ["HF_HUB_CACHE"] == str(root / "hub")
+        assert main.os.environ["HF_DATASETS_CACHE"] == str(root / "datasets")
+        assert main.os.environ["HF_HUB_OFFLINE"] == "1"
+        assert main.os.environ["HF_DATASETS_OFFLINE"] == "1"
+        assert main.os.environ["HF_EVALUATE_OFFLINE"] == "1"
+        assert main.os.environ["TRANSFORMERS_OFFLINE"] == "1"
+
+    assert {name: main.os.environ.get(name) for name in offline_vars} == original_env
