@@ -116,42 +116,50 @@ def _resolve_job_spec_path_for_read(path: str) -> Path | None:
     return resolved
 
 
-def _read_job_spec_parameters_from_path(path: str) -> dict[str, Any]:
-    """Load top-level ``parameters`` object from the job spec JSON file.
+def _read_job_spec_parameters_from_path(path: str) -> dict[str, Any] | None:
+    """Load top-level ``parameters`` from the job spec.
 
-    Only files whose resolved path stays under ``/meta`` are opened (see ``EVALHUB_JOB_SPEC_PATH``).
+    Return ``None`` if the job spec cannot be read or is malformed; a valid spec
+    without a ``parameters`` key returns an empty dict. Only files under ``/meta``
+    are opened (see ``EVALHUB_JOB_SPEC_PATH``).
     """
     resolved = _resolve_job_spec_path_for_read(path)
     if resolved is None:
-        return {}
+        return None
     try:
         with open(resolved, encoding="utf-8") as f:
             spec = json.load(f)
     except FileNotFoundError:
-        return {}
+        return None
     except PermissionError as exc:
         print(
             f"WARNING: permission denied reading job spec {resolved!r}: {exc}",
             file=sys.stderr,
         )
-        return {}
+        return None
     except OSError as exc:
         print(f"WARNING: I/O error reading job spec {resolved!r}: {exc}", file=sys.stderr)
-        return {}
+        return None
     except json.JSONDecodeError as exc:
         print(f"WARNING: invalid JSON in job spec {resolved!r}: {exc}", file=sys.stderr)
-        return {}
+        return None
     except TypeError as exc:
         print(
             f"WARNING: unexpected type while parsing job spec {resolved!r}: {exc}",
             file=sys.stderr,
         )
-        return {}
+        return None
     if not isinstance(spec, dict):
+        return None
+    if "parameters" not in spec:
         return {}
-    parameters = spec.get("parameters")
+    parameters = spec["parameters"]
     if not isinstance(parameters, dict):
-        return {}
+        print(
+            f"WARNING: job spec parameters in {resolved!r} are not a JSON object",
+            file=sys.stderr,
+        )
+        return None
     return parameters
 
 
@@ -257,6 +265,8 @@ def configure_hf_offline_environment(hf_home: str) -> None:
 def _seed_hf_offline_before_lm_eval_import() -> None:
     path = os.environ.get("EVALHUB_JOB_SPEC_PATH", "/meta/job.json")
     parameters = _read_job_spec_parameters_from_path(path)
+    if parameters is None:
+        return
     if not _infer_auto_offline_from_local_test_data(
         parameters, test_data_root=_TEST_DATA_DIR
     ):

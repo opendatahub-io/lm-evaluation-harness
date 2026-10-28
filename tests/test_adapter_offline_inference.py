@@ -147,6 +147,32 @@ def test_explicit_tokenizer_model_id_takes_precedence_over_staged_default(
     )
 
 
+def test_seed_does_not_enable_offline_when_job_spec_cannot_be_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "test_data"
+    _touch(root / "tokenizer" / "config.json")
+    _touch(root / "skg--toxigen-data--annotated" / "dataset_dict.json")
+    monkeypatch.setattr(main, "_TEST_DATA_DIR", str(root))
+    monkeypatch.setattr(main, "_JOB_SPEC_ALLOWED_ROOT", tmp_path)
+    monkeypatch.setenv("EVALHUB_JOB_SPEC_PATH", str(tmp_path / "missing-job.json"))
+    offline_vars = (
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_DATASETS_CACHE",
+        "HF_HUB_OFFLINE",
+        "HF_DATASETS_OFFLINE",
+        "HF_EVALUATE_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+    )
+    for name in offline_vars:
+        monkeypatch.delenv(name, raising=False)
+
+    main._seed_hf_offline_before_lm_eval_import()
+
+    assert all(name not in main.os.environ for name in offline_vars)
+
+
 def test_seed_offline_environment_for_staged_toxigen_assets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -158,10 +184,24 @@ def test_seed_offline_environment_for_staged_toxigen_assets(
     monkeypatch.setattr(main, "_TEST_DATA_DIR", str(root))
     monkeypatch.setattr(main, "_JOB_SPEC_ALLOWED_ROOT", tmp_path)
     monkeypatch.setenv("EVALHUB_JOB_SPEC_PATH", str(job_path))
+    offline_vars = (
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_DATASETS_CACHE",
+        "HF_HUB_OFFLINE",
+        "HF_DATASETS_OFFLINE",
+        "HF_EVALUATE_OFFLINE",
+        "TRANSFORMERS_OFFLINE",
+    )
+    for name in offline_vars:
+        monkeypatch.delenv(name, raising=False)
 
     main._seed_hf_offline_before_lm_eval_import()
 
     assert main.os.environ["HF_HOME"] == str(root)
+    assert main.os.environ["HF_HUB_CACHE"] == str(root / "hub")
+    assert main.os.environ["HF_DATASETS_CACHE"] == str(root / "datasets")
     assert main.os.environ["HF_HUB_OFFLINE"] == "1"
     assert main.os.environ["HF_DATASETS_OFFLINE"] == "1"
+    assert main.os.environ["HF_EVALUATE_OFFLINE"] == "1"
     assert main.os.environ["TRANSFORMERS_OFFLINE"] == "1"
