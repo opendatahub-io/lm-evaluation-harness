@@ -11,7 +11,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-TASKS_DIR = Path(os.environ.get("LMEVAL_TASKS_DIR", Path(__file__).resolve().parents[1] / "lm_eval" / "tasks"))
+
+TASKS_DIR = Path(
+    os.environ.get(
+        "LMEVAL_TASKS_DIR", Path(__file__).resolve().parents[1] / "lm_eval" / "tasks"
+    )
+)
 
 # Packaged builders / placeholders that are not Hub repo ids.
 LOCAL_BUILDERS = {"json", "csv", "parquet", "arrow", "text", "null", "None"}
@@ -21,7 +26,9 @@ class _Loader(yaml.SafeLoader):
     pass
 
 
-_Loader.add_multi_constructor("", lambda loader, suffix, node: None)  # ignore !function etc.
+_Loader.add_multi_constructor(
+    "", lambda loader, suffix, node: None
+)  # ignore !function etc.
 
 
 def _load(path: Path) -> dict:
@@ -35,11 +42,15 @@ def _load(path: Path) -> dict:
 def _iter_dataset_paths():
     """Yield (file, dataset_path) for every dataset_path literal, including list-form task entries."""
     for path in sorted(TASKS_DIR.rglob("*")):
-        if not path.is_file() or not (path.suffix in {".yaml", ".yml"} or path.name.endswith("yaml")):
+        if not path.is_file() or not (
+            path.suffix in {".yaml", ".yml"} or path.name.endswith("yaml")
+        ):
             continue
         data = _load(path)
         entries = [data]
-        if isinstance(data.get("task"), list):  # group files such as benchmarks/t0_eval.yaml
+        if isinstance(
+            data.get("task"), list
+        ):  # group files such as benchmarks/t0_eval.yaml
             entries += [t for t in data["task"] if isinstance(t, dict)]
         for entry in entries:
             value = entry.get("dataset_path")
@@ -48,7 +59,9 @@ def _iter_dataset_paths():
 
 
 def _is_valid(value: str) -> bool:
-    if not value or value in LOCAL_BUILDERS or "{" in value:  # unset, local builder or templated value
+    if (
+        not value or value in LOCAL_BUILDERS or "{" in value
+    ):  # unset, local builder or templated value
         return True
     if value.startswith(("/", "./", "hf://")):  # explicit local path or full URI
         return True
@@ -56,7 +69,11 @@ def _is_valid(value: str) -> bool:
 
 
 def test_dataset_paths_are_namespaced():
-    bad = [f"{file}: dataset_path: {value}" for file, value in _iter_dataset_paths() if not _is_valid(value)]
+    bad = [
+        f"{file}: dataset_path: {value}"
+        for file, value in _iter_dataset_paths()
+        if not _is_valid(value)
+    ]
     assert not bad, (
         "Single-segment Hugging Face dataset ids fail with huggingface_hub>=1.16 (HfUriError). "
         "Use the namespaced id the Hub redirects to:\n" + "\n".join(bad)
