@@ -87,6 +87,35 @@ def _offline_datasetdict_bundle_dir(
     return bundle
 
 
+def _resolve_offline_bundle_dir(
+    hf_home: Optional[str], dataset_path: str, dataset_name: Optional[str]
+) -> Optional[Path]:
+    """Resolve an offline DatasetDict bundle for ``dataset_path``, with a legacy fallback.
+
+    Tries the namespaced slug first (see ``_offline_datasetdict_bundle_dir``). If
+    ``dataset_path`` is namespaced (e.g. ``Rowan/hellaswag``) and no bundle is found
+    there, falls back to the legacy slug derived from the un-namespaced id previously
+    used in task YAMLs (e.g. ``hellaswag``), so bundles staged before dataset_path
+    values were namespaced keep working.
+    """
+    bundle = _offline_datasetdict_bundle_dir(hf_home, dataset_path, dataset_name)
+    if bundle is not None:
+        return bundle
+    if dataset_path and "/" in dataset_path:
+        legacy_path = dataset_path.rsplit("/", 1)[-1]
+        legacy_bundle = _offline_datasetdict_bundle_dir(
+            hf_home, legacy_path, dataset_name
+        )
+        if legacy_bundle is not None:
+            eval_logger.info(
+                "Offline: no bundle at namespaced slug for %s; using legacy bundle at %s",
+                dataset_path,
+                legacy_bundle,
+            )
+            return legacy_bundle
+    return None
+
+
 def _load_datasetdict_from_offline_bundle(bundle: Path) -> Any:
     """Load a DatasetDict export from disk; clarify failures caused by datasets/PyArrow version skew."""
     # Staged inputs are read-only. Dataset.map/filter normally place caches next
@@ -331,7 +360,7 @@ class Task(abc.ABC):
         )
 
         if offline:
-            bundle = _offline_datasetdict_bundle_dir(
+            bundle = _resolve_offline_bundle_dir(
                 os.environ.get("HF_HOME"),
                 self.DATASET_PATH,
                 self.DATASET_NAME,
@@ -1026,7 +1055,7 @@ class ConfigurableTask(Task):
             or os.environ.get("HF_HUB_OFFLINE") == "1"
         )
         if offline:
-            bundle = _offline_datasetdict_bundle_dir(
+            bundle = _resolve_offline_bundle_dir(
                 os.environ.get("HF_HOME"),
                 self.DATASET_PATH,
                 self.DATASET_NAME,
