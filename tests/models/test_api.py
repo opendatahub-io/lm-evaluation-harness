@@ -14,7 +14,19 @@ def api():
 
 
 @pytest.fixture
-def api_tokenized():
+def local_hf_tokenizer(monkeypatch):
+    """Provide a tokenizer stub so tokenized API tests do not access the Hub."""
+    tokenizer = MagicMock()
+    tokenizer.pad_token = "<pad>"
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained",
+        lambda *args, **kwargs: tokenizer,
+    )
+    return tokenizer
+
+
+@pytest.fixture
+def api_tokenized(local_hf_tokenizer):
     return LocalCompletionsAPI(
         base_url="http://test-url.com",
         model="EleutherAI/pythia-1b",
@@ -23,7 +35,7 @@ def api_tokenized():
 
 
 @pytest.fixture
-def api_batch_ssl_tokenized():
+def api_batch_ssl_tokenized(local_hf_tokenizer):
     return LocalCompletionsAPI(
         base_url="https://test-url.com",
         model="EleutherAI/pythia-1b",
