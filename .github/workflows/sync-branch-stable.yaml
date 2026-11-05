@@ -9,19 +9,24 @@ jobs:
     if: ${{ github.repository == 'opendatahub-io/lm-evaluation-harness' }}
     runs-on: ubuntu-latest
     name: Syncing branch stable
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - name: Opening pull request
         id: pull
-        uses: tretuna/sync-branches@1.4.0
+        uses: tretuna/sync-branches@ea58ab6e406fd3ad016a064b31270bbb41127f41 # 1.4.0
         with:
           GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
           FROM_BRANCH: "incubation"
           TO_BRANCH: "stable"
       - name: Add labels
         if: ${{ steps.pull.outputs.PULL_REQUEST_NUMBER != '' }}
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             github.rest.issues.addLabels({
