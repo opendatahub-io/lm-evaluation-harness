@@ -242,7 +242,12 @@ class CachingLM:
         self.cache_db = cache_db
         if os.path.dirname(cache_db):
             os.makedirs(os.path.dirname(cache_db), exist_ok=True)
-        self.dbdict = SqliteDict(cache_db, autocommit=True)
+        self.dbdict = SqliteDict(
+            cache_db,
+            autocommit=True,
+            encode=json.dumps,
+            decode=json.loads,
+        )
 
         # add hook to lm
         lm.set_cache_hook(self.get_cache_hook())
