@@ -87,6 +87,72 @@ def _offline_datasetdict_bundle_dir(
     return bundle
 
 
+# Hugging Face dataset ids that were namespaced in task YAMLs, mapped to the
+# un-namespaced id the YAMLs used before. Only ids listed here fall back to an
+# offline bundle staged under the old id. Any other id never falls back, so a
+# custom dataset such as ``myorg/gsm8k`` cannot silently load a ``gsm8k`` bundle.
+_LEGACY_DATASET_PATHS: Dict[str, str] = {
+    "allenai/openbookqa": "openbookqa",
+    "allenai/sciq": "sciq",
+    "allenai/swag": "swag",
+    "allenai/winogrande": "winogrande",
+    "aps/super_glue": "super_glue",
+    "baber/piqa": "piqa",
+    "cambridgeltl/xcopa": "xcopa",
+    "cimec/lambada": "lambada",
+    "CogComp/mc_taco": "mc_taco",
+    "community-datasets/qa4mre": "qa4mre",
+    "EdinburghNLP/orange_sum": "orange_sum",
+    "facebook/anli": "anli",
+    "facebook/xnli": "xnli",
+    "google-research-datasets/nq_open": "nq_open",
+    "google-research-datasets/paws-x": "paws-x",
+    "google/xquad": "xquad",
+    "IWSLT/iwslt2017": "iwslt2017",
+    "lighteval/siqa": "social_i_qa",
+    "lighteval/winograd_wsc": "winograd_wsc",
+    "LSDSem/story_cloze": "story_cloze",
+    "mandarjoshi/trivia_qa": "trivia_qa",
+    "nyu-mll/blimp": "blimp",
+    "nyu-mll/glue": "glue",
+    "openai/gsm8k": "gsm8k",
+    "openlifescienceai/medmcqa": "medmcqa",
+    "regisss/math_qa": "math_qa",
+    "Rowan/hellaswag": "hellaswag",
+    "stanfordnlp/web_questions": "web_questions",
+    "truthfulqa/truthful_qa": "truthful_qa",
+    "wmt/wmt14": "wmt14",
+    "wmt/wmt16": "wmt16",
+}
+
+
+def _resolve_offline_bundle_dir(
+    hf_home: Optional[str], dataset_path: str, dataset_name: Optional[str]
+) -> Optional[Path]:
+    """Resolve an offline DatasetDict bundle for ``dataset_path``, with a legacy fallback.
+
+    Tries the namespaced slug first (see ``_offline_datasetdict_bundle_dir``). If no
+    bundle is found and ``dataset_path`` is one of the ids renamed when task YAMLs
+    were namespaced (see ``_LEGACY_DATASET_PATHS``), falls back to the bundle staged
+    under the old, un-namespaced id (e.g. ``Rowan/hellaswag`` -> ``hellaswag``,
+    ``lighteval/siqa`` -> ``social_i_qa``). Ids not in that table never fall back.
+    """
+    bundle = _offline_datasetdict_bundle_dir(hf_home, dataset_path, dataset_name)
+    if bundle is not None:
+        return bundle
+    legacy_path = _LEGACY_DATASET_PATHS.get(dataset_path)
+    if legacy_path is None:
+        return None
+    legacy_bundle = _offline_datasetdict_bundle_dir(hf_home, legacy_path, dataset_name)
+    if legacy_bundle is not None:
+        eval_logger.info(
+            "Offline: no bundle at namespaced slug for %s; using legacy bundle at %s",
+            dataset_path,
+            legacy_bundle,
+        )
+    return legacy_bundle
+
+
 def _load_datasetdict_from_offline_bundle(bundle: Path) -> Any:
     """Load a DatasetDict export from disk; clarify failures caused by datasets/PyArrow version skew."""
     # Staged inputs are read-only. Dataset.map/filter normally place caches next
@@ -331,7 +397,7 @@ class Task(abc.ABC):
         )
 
         if offline:
-            bundle = _offline_datasetdict_bundle_dir(
+            bundle = _resolve_offline_bundle_dir(
                 os.environ.get("HF_HOME"),
                 self.DATASET_PATH,
                 self.DATASET_NAME,
@@ -1026,7 +1092,7 @@ class ConfigurableTask(Task):
             or os.environ.get("HF_HUB_OFFLINE") == "1"
         )
         if offline:
-            bundle = _offline_datasetdict_bundle_dir(
+            bundle = _resolve_offline_bundle_dir(
                 os.environ.get("HF_HOME"),
                 self.DATASET_PATH,
                 self.DATASET_NAME,
