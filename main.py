@@ -603,6 +603,7 @@ def _build_additional_info(
     random_seed: int,
     hf_offline: bool,
     overall_score: float | None,
+    longbench_truncation_stats: dict | None = None,
 ) -> dict[str, Any]:
     """Build the additional_info dict from lm-eval results and run configuration.
 
@@ -690,6 +691,36 @@ def _build_additional_info(
         "hf_offline": hf_offline,
         "timeout_seconds": int(benchmark_params.get("timeout_seconds", 300)),
     }
+
+    is_longbench = benchmark_id == "longbench2" or benchmark_id.startswith(
+        "longbench2_"
+    )
+    if is_longbench:
+        overflow_policy = model_args.get("loglikelihood_context_overflow", "middle")
+        truncation_method = {
+            "middle": "middle",
+            "truncate": "left",
+            "error": "none",
+        }[overflow_policy]
+        raw.update(
+            {
+                "configured_context_limit_tokens": model_args.get("max_length"),
+                "input_token_budget": max(
+                    0, int(model_args.get("max_length", 1)) - 1
+                ),
+                "reserved_output_tokens": 1,
+                "truncation_method": truncation_method,
+                "num_examples_evaluated": n_samples.get("effective"),
+                "num_examples_truncated": len(
+                    (longbench_truncation_stats or {}).get(
+                        "truncated_example_ids", {}
+                    )
+                ),
+                "num_truncated_loglikelihood_requests": (
+                    longbench_truncation_stats or {}
+                ).get("truncated_requests", 0),
+            }
+        )
 
     # Exclude fields with None values to keep the output clean
     return {k: v for k, v in raw.items() if v is not None}
@@ -817,12 +848,20 @@ def build_lmeval_config(job_spec: JobSpec) -> tuple[str, dict, str | None]:
             "LongBench requires parameters.max_length set to the served model's context limit"
         )
     if is_longbench or "loglikelihood_context_overflow" in benchmark_params:
-        overflow = benchmark_params.get("loglikelihood_context_overflow", "error")
-        if overflow not in ("error", "truncate"):
+        overflow = benchmark_params.get(
+            "loglikelihood_context_overflow", "middle" if is_longbench else "truncate"
+        )
+        if overflow not in ("error", "truncate", "middle"):
             raise ValueError(
-                "parameters.loglikelihood_context_overflow must be 'error' or 'truncate'"
+                "parameters.loglikelihood_context_overflow must be 'error', "
+                "'truncate', or 'middle'"
             )
         context_args["loglikelihood_context_overflow"] = overflow
+    if is_longbench:
+        context_args["longbench_truncation_stats"] = {
+            "truncated_example_ids": {},
+            "truncated_requests": 0,
+        }
 
     # Optional generation parameters for generate_until tasks.
     parameters = benchmark_params.get("parameters", {})
@@ -1056,6 +1095,9 @@ class LMEvalAdapter(FrameworkAdapter):
                     )
             finally:
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = _prev_trust_remote_code
+            longbench_truncation_stats = model_args.pop(
+                "longbench_truncation_stats", None
+            )
             # Phase 4: Post-processing
             callbacks.report_status(
                 JobStatusUpdate(
@@ -1149,6 +1191,7 @@ class LMEvalAdapter(FrameworkAdapter):
                 random_seed=random_seed,
                 hf_offline=hf_offline,
                 overall_score=overall_score,
+                longbench_truncation_stats=longbench_truncation_stats,
             )
 
             # Get number of examples evaluated

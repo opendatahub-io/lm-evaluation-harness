@@ -42,7 +42,15 @@ from lm_eval.models.utils import Collator, chunks, configure_pad_token
 
 eval_logger = logging.getLogger(__name__)
 
-LogLikelihoodInputs = Tuple[Tuple[str, str], List[int], List[int]]
+LogLikelihoodInputs = Union[
+    Tuple[Tuple[str, str], List[int], List[int]],
+    Tuple[
+        Tuple[str, str],
+        List[int],
+        List[int],
+        Optional[Tuple[Optional[str], Optional[int]]],
+    ],
+]
 
 
 # utility class to keep track of json encoded chats
@@ -85,7 +93,10 @@ class TemplateAPI(TemplateLM):
         eos_string: str = None,
         # timeout in seconds
         timeout: int = 300,
-        loglikelihood_context_overflow: Literal["error", "truncate"] = "truncate",
+        loglikelihood_context_overflow: Literal[
+            "error", "truncate", "middle"
+        ] = "truncate",
+        longbench_truncation_stats: Optional[dict] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -117,11 +128,13 @@ class TemplateAPI(TemplateLM):
         # max_length - 1 as we always have 1 token for generation
         eval_logger.info(f"Using max length {max_length} - 1")
         self.max_length = max_length - 1
-        if loglikelihood_context_overflow not in ("error", "truncate"):
+        if loglikelihood_context_overflow not in ("error", "truncate", "middle"):
             raise ValueError(
-                "loglikelihood_context_overflow must be 'error' or 'truncate'"
+                "loglikelihood_context_overflow must be 'error', 'truncate', "
+                "or 'middle'"
             )
         self.loglikelihood_context_overflow = loglikelihood_context_overflow
+        self.longbench_truncation_stats = longbench_truncation_stats
         if int(num_concurrent) <= 1:
             eval_logger.info(
                 "Concurrent requests are disabled. To enable concurrent requests, set `num_concurrent` > 1."
@@ -177,6 +190,7 @@ class TemplateAPI(TemplateLM):
                         revision=revision,
                         use_fast=use_fast_tokenizer,
                     )
+
                     # Not used as the API will handle padding but to mirror the behavior of the HFLM
                     self.tokenizer = configure_pad_token(self.tokenizer)
                 elif self.tokenizer_backend == "tiktoken":
@@ -204,6 +218,38 @@ class TemplateAPI(TemplateLM):
                     revision=revision,
                     use_fast=use_fast_tokenizer,
                 )
+
+    def loglikelihood(self, requests, disable_tqdm: bool = False):
+        """Encode likelihood requests while retaining task/document identity.
+
+        The identity is used only for protocol accounting, so multiple-choice
+        requests for the same LongBench document count as one truncated example.
+        """
+        new_reqs = []
+        for request in requests:
+            context, continuation = request.args
+            if context == "":
+                context_enc, continuation_enc = (
+                    [self.prefix_token_id],
+                    self.tok_encode(continuation),
+                )
+            else:
+                context_enc, continuation_enc = self._encode_pair(
+                    context, continuation
+                )
+
+            task_name = getattr(request, "task_name", None)
+            doc_id = getattr(request, "doc_id", None)
+            sample_id = (
+                (task_name, doc_id)
+                if task_name is not None and doc_id is not None
+                else None
+            )
+            new_reqs.append(
+                ((context, continuation), context_enc, continuation_enc, sample_id)
+            )
+
+        return self._loglikelihood_tokens(new_reqs, disable_tqdm=disable_tqdm)
 
     @abc.abstractmethod
     def _create_payload(
@@ -487,28 +533,181 @@ class TemplateAPI(TemplateLM):
         ctxlens = []
         cache_keys = []
         for chunk in chunks:
-            for cache_key, context_enc, continuation_enc in chunk:
+            for request in chunk:
+                cache_key, context_enc, continuation_enc = request[:3]
+                sample_id = request[3] if len(request) > 3 else None
                 total_length = len(context_enc) + len(continuation_enc)
+                was_truncated = total_length > self.max_length
                 if (
-                    total_length > self.max_length
+                    was_truncated
                     and self.loglikelihood_context_overflow == "error"
                 ):
                     raise ValueError(
                         f"Loglikelihood input has {total_length} tokens, exceeding "
                         f"the {self.max_length}-token input budget (max_length minus "
                         "one output token). No truncated request was sent. Use a "
-                        "larger supported context limit or explicitly select "
-                        "loglikelihood_context_overflow='truncate'."
+                        "larger supported context limit or select an explicit "
+                        "loglikelihood_context_overflow policy."
                     )
-                # max_length - 1 as we always have 1 token for generation
-                inp = (context_enc + continuation_enc)[-self.max_length :]
-                if len(inp) < len(context_enc + continuation_enc):
+                if (
+                    was_truncated
+                    and self.loglikelihood_context_overflow == "middle"
+                ):
+                    prompt_budget = self.max_length - len(continuation_enc)
+                    if prompt_budget < 2:
+                        raise ValueError(
+                            "Answer-choice continuation leaves fewer than two "
+                            "prompt tokens, so middle truncation cannot preserve "
+                            "both prompt edges."
+                        )
+                    head_length = (prompt_budget + 1) // 2
+                    tail_length = prompt_budget // 2
+                    truncated_context = context_enc[:head_length]
+                    if tail_length:
+                        truncated_context += context_enc[-tail_length:]
+                    inp = truncated_context + continuation_enc
+                    ctxlen = len(truncated_context)
                     eval_logger.warning(
-                        f"Context length ({len(context_enc)}) + continuation length ({len(continuation_enc)}) > max_length ({self.max_length}). Left truncating context."
+                        "Prompt exceeded the %d-token input budget; "
+                        "middle-truncated prompt from %d to %d tokens.",
+                        self.max_length,
+                        len(context_enc),
+                        len(truncated_context),
                     )
-                ctxlen = len(context_enc) - max(
-                    0, len(context_enc) + len(continuation_enc) - self.max_length
-                )
+                else:
+                    # Preserve the existing left-truncation behavior for other tasks.
+                    inp = (context_enc + continuation_enc)[-self.max_length :]
+                    if len(inp) < len(context_enc + continuation_enc):
+                        eval_logger.warning(
+                            "Context length (%d) + continuation length (%d) > "
+                            "max_length (%d). Left truncating context.",
+                            len(context_enc),
+                            len(continuation_enc),
+                            self.max_length,
+                        )
+                    ctxlen = len(context_enc) - max(
+                        0,
+                        len(context_enc) + len(continuation_enc) - self.max_length,
+                    )
+
+                # String-based APIs decode these tokens in create_message before
+                # sending them. Decoding is not necessarily lossless for the
+                # tokenizer, so base the budget and prompt boundary on the text
+                # that will actually be sent.
+                if not self.tokenized_requests and self.tokenizer is not None:
+                    sent_text = self.decode_batch([inp])[0]
+                    sent_tokens = self.tok_encode(sent_text)
+                    retokenized_was_truncated = len(sent_tokens) > self.max_length
+                    if len(sent_tokens) > self.max_length:
+                        if self.loglikelihood_context_overflow == "error":
+                            raise ValueError(
+                                f"Loglikelihood input has {len(sent_tokens)} tokens, "
+                                f"exceeding the {self.max_length}-token input budget "
+                                "after decoding and re-tokenizing. No truncated "
+                                "request was sent."
+                            )
+                        if self.loglikelihood_context_overflow == "middle":
+                            continuation = (
+                                cache_key[1] if isinstance(cache_key, tuple) else ""
+                            )
+                            if continuation and not sent_text.endswith(continuation):
+                                raise ValueError(
+                                    "Cannot safely separate the answer-choice "
+                                    "continuation from the decoded likelihood input; "
+                                    "no request was sent."
+                                )
+                            prompt_text = (
+                                sent_text[: -len(continuation)]
+                                if continuation
+                                else sent_text
+                            )
+                            prompt_tokens = self.tok_encode(prompt_text)
+                            continuation_tokens = self.tok_encode(continuation)
+                            prompt_budget = self.max_length - len(continuation_tokens)
+                            if prompt_budget < 2:
+                                raise ValueError(
+                                    "Answer-choice continuation leaves fewer than "
+                                    "two prompt tokens, so middle truncation cannot "
+                                    "preserve both prompt edges."
+                                )
+                            prompt_budget = min(prompt_budget, len(prompt_tokens))
+                            while prompt_budget >= 2:
+                                if prompt_budget == len(prompt_tokens):
+                                    retained_prompt = prompt_tokens
+                                else:
+                                    head_length = (prompt_budget + 1) // 2
+                                    tail_length = prompt_budget // 2
+                                    retained_prompt = prompt_tokens[:head_length]
+                                    if tail_length:
+                                        retained_prompt += prompt_tokens[-tail_length:]
+
+                                candidate_tokens = (
+                                    retained_prompt + continuation_tokens
+                                )
+                                candidate_text = self.decode_batch(
+                                    [candidate_tokens]
+                                )[0]
+                                if continuation and not candidate_text.endswith(
+                                    continuation
+                                ):
+                                    raise ValueError(
+                                        "Middle truncation did not preserve the full "
+                                        "answer-choice continuation; no request was "
+                                        "sent."
+                                    )
+
+                                sent_tokens = self.tok_encode(candidate_text)
+                                sent_text = self.decode_batch([sent_tokens])[0]
+                                final_length = len(self.tok_encode(sent_text))
+                                if (
+                                    final_length <= self.max_length
+                                    and (
+                                        not continuation
+                                        or sent_text.endswith(continuation)
+                                    )
+                                ):
+                                    break
+
+                                prompt_budget -= max(
+                                    1, final_length - self.max_length
+                                )
+                            else:
+                                raise ValueError(
+                                    "The answer-choice continuation and two prompt "
+                                    "edge tokens do not fit within the input budget; "
+                                    "no request was sent."
+                                )
+                        else:
+                            # Preserve legacy left truncation for the explicit
+                            # `truncate` policy.
+                            sent_tokens = sent_tokens[-self.max_length :]
+                            sent_text = self.decode_batch([sent_tokens])[0]
+                            sent_tokens = self.tok_encode(sent_text)
+                            if len(sent_tokens) > self.max_length:
+                                sent_tokens = sent_tokens[-self.max_length :]
+                                sent_text = self.decode_batch([sent_tokens])[0]
+                                sent_tokens = self.tok_encode(sent_text)
+
+                    inp = sent_tokens
+                    continuation = cache_key[1] if isinstance(cache_key, tuple) else ""
+                    if continuation and sent_text.endswith(continuation):
+                        prompt_text = sent_text[: -len(continuation)]
+                        ctxlen = len(self._encode_pair(prompt_text, continuation)[0])
+                    else:
+                        ctxlen = min(ctxlen, len(inp))
+                    was_truncated = (
+                        was_truncated
+                        or retokenized_was_truncated
+                        or len(inp) < len(context_enc) + len(continuation_enc)
+                    )
+
+                if was_truncated and self.longbench_truncation_stats is not None:
+                    if sample_id:
+                        example_key = json.dumps(sample_id, separators=(",", ":"))
+                        self.longbench_truncation_stats[
+                            "truncated_example_ids"
+                        ].setdefault(example_key, True)
+                    self.longbench_truncation_stats["truncated_requests"] += 1
 
                 inputs.append(inp)
                 ctxlens.append(ctxlen)

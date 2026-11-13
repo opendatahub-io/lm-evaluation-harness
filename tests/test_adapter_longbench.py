@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import main
+from lm_eval.api.instance import Instance
 from lm_eval.models.openai_completions import LocalCompletionsAPI
 
 
@@ -20,7 +21,11 @@ def job(parameters, benchmark="longbench2"):
 @pytest.mark.parametrize("benchmark", ["longbenchv2", "longbench2"])
 def test_longbench_explicit_budget_reaches_backend(benchmark):
     _, args, _ = main.build_lmeval_config(job({"max_length": 37568}, benchmark))
-    assert args["loglikelihood_context_overflow"] == "error"
+    assert args["loglikelihood_context_overflow"] == "middle"
+    assert args["longbench_truncation_stats"] == {
+        "truncated_example_ids": {},
+        "truncated_requests": 0,
+    }
     api = LocalCompletionsAPI(**{**args, "tokenizer_backend": None, "tokenizer": None})
     assert api.max_length == 37567  # The likelihood API reserves one output token.
     context = list(range(3000))
@@ -29,6 +34,10 @@ def test_longbench_explicit_budget_reaches_backend(benchmark):
     )
     assert inputs == [context + [3001]]
     assert lengths == [3000]
+    assert args["longbench_truncation_stats"] == {
+        "truncated_example_ids": {},
+        "truncated_requests": 0,
+    }
     assert args["tokenized_requests"] is False
 
 
@@ -55,7 +64,13 @@ def test_invalid_overflow_mode_is_rejected(mode):
 @pytest.mark.parametrize("concurrent", [1, 2])
 def test_overflow_fails_before_any_model_call(monkeypatch, concurrent):
     _, args, _ = main.build_lmeval_config(
-        job({"max_length": 10, "num_concurrent": concurrent})
+        job(
+            {
+                "max_length": 10,
+                "num_concurrent": concurrent,
+                "loglikelihood_context_overflow": "error",
+            }
+        )
     )
     api = LocalCompletionsAPI(**{**args, "tokenizer_backend": None, "tokenizer": None})
     api.tokenizer = (
@@ -95,6 +110,115 @@ def test_explicit_truncation_and_other_task_default_are_preserved():
     _, default_args, _ = main.build_lmeval_config(job({}, "arc_easy"))
     assert "max_length" not in default_args
     assert "loglikelihood_context_overflow" not in default_args
+
+
+def test_middle_truncation_preserves_prompt_edges_and_complete_continuations():
+    stats = {"truncated_example_ids": {}, "truncated_requests": 0}
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        max_length=10,
+        loglikelihood_context_overflow="middle",
+        longbench_truncation_stats=stats,
+    )
+    context = list(range(12))
+    requests = [
+        (("prompt", " A"), context, [91], ("longbench2_task", 4)),
+        (("prompt", " B"), context, [92], ("longbench2_task", 4)),
+        (("prompt 2", " A"), context, [93], ("longbench2_task", 5)),
+        (("prompt 2", " B"), context, [94], ("longbench2_task", 5)),
+    ]
+
+    inputs, ctxlens, _ = api.batch_loglikelihood_requests([requests])
+
+    expected_context = [0, 1, 2, 3, 8, 9, 10, 11]
+    assert inputs == [expected_context + [91 + index] for index in range(4)]
+    assert ctxlens == [8, 8, 8, 8]
+    assert len(stats["truncated_example_ids"]) == 2
+    assert stats["truncated_requests"] == 4
+
+
+def test_middle_truncation_rejects_choice_that_cannot_preserve_both_prompt_edges():
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        max_length=4,
+        loglikelihood_context_overflow="middle",
+    )
+    with pytest.raises(ValueError, match="cannot preserve both prompt edges"):
+        api.batch_loglikelihood_requests(
+            [[(("prompt", " answer"), [1, 2, 3], [4, 5])]]
+        )
+
+
+def test_left_truncation_is_included_in_protocol_counts():
+    stats = {"truncated_example_ids": {}, "truncated_requests": 0}
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        max_length=10,
+        loglikelihood_context_overflow="truncate",
+        longbench_truncation_stats=stats,
+    )
+    requests = [
+        (("prompt", " A"), list(range(12)), [91], ("longbench2_task", 4)),
+        (("prompt", " B"), list(range(12)), [92], ("longbench2_task", 4)),
+    ]
+
+    inputs, ctxlens, _ = api.batch_loglikelihood_requests([requests])
+
+    assert inputs == [list(range(4, 12)) + [91], list(range(4, 12)) + [92]]
+    assert ctxlens == [8, 8]
+    assert len(stats["truncated_example_ids"]) == 1
+    assert stats["truncated_requests"] == 2
+
+
+def test_string_request_retokenizes_decoded_text_before_budget_and_boundary():
+    api = LocalCompletionsAPI(
+        tokenizer_backend=None,
+        tokenized_requests=False,
+        max_length=4,
+        loglikelihood_context_overflow="truncate",
+    )
+    api.tokenizer = object()
+    api.decode_batch = MagicMock(
+        side_effect=lambda tokens: [
+            "old A" if tokens[0] == [1, 2, 3, 4] else "new A"
+        ]
+    )
+    api.tok_encode = MagicMock(
+        side_effect=lambda text: {
+            "old A": [10, 11, 12, 13, 14],
+            "new A": [20, 21, 22, 23],
+            "new": [20, 21, 22],
+            " A": [23],
+        }[text]
+    )
+    api._encode_pair = MagicMock(return_value=([20, 21, 22], [23]))
+
+    inputs, ctxlens, _ = api.batch_loglikelihood_requests(
+        [[(("prompt", " A"), [1, 2, 3], [4])]]
+    )
+
+    assert inputs == [[20, 21, 22, 23]]
+    assert ctxlens == [3]
+    api._encode_pair.assert_called_once_with("new", " A")
+
+
+def test_loglikelihood_retains_task_and_document_ids(monkeypatch):
+    api = LocalCompletionsAPI(tokenizer_backend=None)
+    monkeypatch.setattr(api, "_encode_pair", lambda context, continuation: ([1], [2]))
+    dispatch = MagicMock(return_value=[])
+    monkeypatch.setattr(api, "_loglikelihood_tokens", dispatch)
+    request = Instance(
+        request_type="loglikelihood",
+        doc={},
+        arguments=("prompt", " A"),
+        idx=0,
+        metadata=("longbench2_task", 17, 1),
+    )
+
+    api.loglikelihood([request])
+
+    encoded_requests = dispatch.call_args.args[0]
+    assert encoded_requests == [(("prompt", " A"), [1], [2], ("longbench2_task", 17))]
 
 
 def group_results():
@@ -151,7 +275,13 @@ def test_nested_group_uses_weighted_score_and_actual_coverage(
     task_manager._name_is_tag.return_value = False
     monkeypatch.setattr(main, "TaskManager", MagicMock(return_value=task_manager))
     monkeypatch.setattr(main, "_build_dataset_info", lambda *args: None)
-    evaluate = MagicMock(return_value=group_results())
+    def fake_evaluate(**kwargs):
+        stats = kwargs["model_args"]["longbench_truncation_stats"]
+        stats["truncated_example_ids"]["[\"history\",0]"] = True
+        stats["truncated_requests"] = 4
+        return group_results()
+
+    evaluate = MagicMock(side_effect=fake_evaluate)
     monkeypatch.setattr(main, "simple_evaluate", evaluate)
     config = job({"max_length": 37568}, benchmark)
     config.id = "00000000-0000-0000-0000-000000000001"
@@ -169,9 +299,16 @@ def test_nested_group_uses_weighted_score_and_actual_coverage(
     assert adapter._run_info["num_samples_original"] == 15
     assert adapter._run_info["num_samples_effective"] == 4
     assert adapter._run_info["max_length"] == 37568
+    assert adapter._run_info["configured_context_limit_tokens"] == 37568
+    assert adapter._run_info["input_token_budget"] == 37567
+    assert adapter._run_info["reserved_output_tokens"] == 1
+    assert adapter._run_info["truncation_method"] == "middle"
+    assert adapter._run_info["num_examples_evaluated"] == 4
+    assert adapter._run_info["num_examples_truncated"] == 1
+    assert adapter._run_info["num_truncated_loglikelihood_requests"] == 4
     assert (
         evaluate.call_args.kwargs["model_args"]["loglikelihood_context_overflow"]
-        == "error"
+        == "middle"
     )
 
 
