@@ -5,10 +5,10 @@ import os
 import random
 import re
 from collections.abc import Callable
-from pathlib import Path
 from copy import copy, deepcopy
 from dataclasses import asdict, dataclass
 from inspect import getsource
+from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -23,8 +23,8 @@ from typing import (
 )
 
 import datasets
-from datasets import DownloadConfig
 import numpy as np
+from datasets import DownloadConfig
 from tqdm import tqdm
 
 from lm_eval import utils
@@ -127,9 +127,20 @@ _LEGACY_DATASET_PATHS: Dict[str, str] = {
     "wmt/wmt16": "wmt16",
 }
 
+_DATA_SELECTION_KWARGS = ("revision", "data_files", "data_dir")
+
+
+def _legacy_fallback_allowed(dataset_kwargs: Optional[Dict[str, Any]]) -> bool:
+    """Legacy bundles were staged from the default revision/files; never use them when the task pins other data."""
+    return not any((dataset_kwargs or {}).get(k) for k in _DATA_SELECTION_KWARGS)
+
 
 def _resolve_offline_bundle_dir(
-    hf_home: Optional[str], dataset_path: str, dataset_name: Optional[str]
+    hf_home: Optional[str],
+    dataset_path: str,
+    dataset_name: Optional[str],
+    *,
+    allow_legacy_fallback: bool = True,
 ) -> Optional[Path]:
     """Resolve an offline DatasetDict bundle for ``dataset_path``, with a legacy fallback.
 
@@ -138,12 +149,22 @@ def _resolve_offline_bundle_dir(
     were namespaced (see ``_LEGACY_DATASET_PATHS``), falls back to the bundle staged
     under the old, un-namespaced id (e.g. ``Rowan/hellaswag`` -> ``hellaswag``,
     ``lighteval/siqa`` -> ``social_i_qa``). Ids not in that table never fall back.
+    ``allow_legacy_fallback=False`` disables the legacy fallback (the namespaced-slug
+    lookup still runs) — used when the task pins a revision/data_files/data_dir that
+    the legacy bundle, staged from the default revision/files, cannot be assumed to match.
     """
     bundle = _offline_datasetdict_bundle_dir(hf_home, dataset_path, dataset_name)
     if bundle is not None:
         return bundle
     legacy_path = _LEGACY_DATASET_PATHS.get(dataset_path)
     if legacy_path is None:
+        return None
+    if not allow_legacy_fallback:
+        eval_logger.debug(
+            "Offline: skipping legacy bundle fallback for %s because dataset_kwargs "
+            "pin a revision, data_files, or data_dir",
+            dataset_path,
+        )
         return None
     legacy_bundle = _offline_datasetdict_bundle_dir(hf_home, legacy_path, dataset_name)
     if legacy_bundle is not None:
@@ -403,6 +424,7 @@ class Task(abc.ABC):
                 os.environ.get("HF_HOME"),
                 self.DATASET_PATH,
                 self.DATASET_NAME,
+                allow_legacy_fallback=(data_dir is None),
             )
             if bundle is not None:
                 eval_logger.info(
@@ -1098,6 +1120,7 @@ class ConfigurableTask(Task):
                 os.environ.get("HF_HOME"),
                 self.DATASET_PATH,
                 self.DATASET_NAME,
+                allow_legacy_fallback=_legacy_fallback_allowed(kwargs),
             )
             if bundle is not None:
                 eval_logger.info(
