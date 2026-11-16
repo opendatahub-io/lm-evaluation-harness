@@ -71,6 +71,15 @@ def test_falls_back_to_legacy_bbh_bundle(tmp_path: Path):
     assert resolved == legacy
 
 
+def test_falls_back_to_legacy_squad_v2_bundle(tmp_path: Path):
+    # squad_v2 was renamed squad_v2 -> lighteval/squad_v2.
+    legacy = _stage_bundle(tmp_path, "squad_v2")
+
+    resolved = _resolve_offline_bundle_dir(str(tmp_path), "lighteval/squad_v2", None)
+
+    assert resolved == legacy
+
+
 def test_no_legacy_fallback_for_unmapped_namespaced_path(tmp_path: Path):
     # A custom namespaced id must never resolve to an unrelated legacy bundle.
     _stage_bundle(tmp_path, "hellaswag")

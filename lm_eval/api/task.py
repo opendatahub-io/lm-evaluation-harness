@@ -110,6 +110,7 @@ _LEGACY_DATASET_PATHS: Dict[str, str] = {
     "google/xquad": "xquad",
     "IWSLT/iwslt2017": "iwslt2017",
     "lighteval/siqa": "social_i_qa",
+    "lighteval/squad_v2": "squad_v2",
     "lighteval/winograd_wsc": "winograd_wsc",
     "LSDSem/story_cloze": "story_cloze",
     "mandarjoshi/trivia_qa": "trivia_qa",
