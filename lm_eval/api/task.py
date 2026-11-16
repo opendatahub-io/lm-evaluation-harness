@@ -87,8 +87,8 @@ def _offline_datasetdict_bundle_dir(
     return bundle
 
 
-# Hugging Face dataset ids that were namespaced in task YAMLs, mapped to the
-# un-namespaced id the YAMLs used before. Only ids listed here fall back to an
+# Hugging Face dataset ids that were renamed in task YAMLs, mapped to the
+# id the YAMLs used before. Only ids listed here fall back to an
 # offline bundle staged under the old id. Any other id never falls back, so a
 # custom dataset such as ``myorg/gsm8k`` cannot silently load a ``gsm8k`` bundle.
 _LEGACY_DATASET_PATHS: Dict[str, str] = {
@@ -119,6 +119,7 @@ _LEGACY_DATASET_PATHS: Dict[str, str] = {
     "openlifescienceai/medmcqa": "medmcqa",
     "regisss/math_qa": "math_qa",
     "Rowan/hellaswag": "hellaswag",
+    "SaylorTwift/bbh": "lukaemon/bbh",
     "stanfordnlp/web_questions": "web_questions",
     "truthfulqa/truthful_qa": "truthful_qa",
     "wmt/wmt14": "wmt14",

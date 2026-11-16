@@ -59,6 +59,18 @@ def test_falls_back_to_legacy_social_i_qa_bundle(tmp_path: Path):
     assert resolved == legacy
 
 
+def test_falls_back_to_legacy_bbh_bundle(tmp_path: Path):
+    # bbh was renamed lukaemon/bbh -> SaylorTwift/bbh; the legacy id is itself
+    # namespaced, so this needs the explicit mapping.
+    legacy = _stage_bundle(tmp_path, "lukaemon--bbh--boolean_expressions")
+
+    resolved = _resolve_offline_bundle_dir(
+        str(tmp_path), "SaylorTwift/bbh", "boolean_expressions"
+    )
+
+    assert resolved == legacy
+
+
 def test_no_legacy_fallback_for_unmapped_namespaced_path(tmp_path: Path):
     # A custom namespaced id must never resolve to an unrelated legacy bundle.
     _stage_bundle(tmp_path, "hellaswag")
