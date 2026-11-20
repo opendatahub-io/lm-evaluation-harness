@@ -48,7 +48,7 @@ class SGLangLM(TemplateLM):
         tokenizer_path: Optional[str] = None,
         tokenizer_mode: str = "auto",
         load_format: str = "auto",
-        trust_remote_code: bool = True,
+        trust_remote_code: bool = False,
         dtype: str = "auto",
         kv_cache_dtype: str = "auto",
         context_length: Optional[int] = None,
